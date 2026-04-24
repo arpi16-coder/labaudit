@@ -16,6 +16,8 @@ import ClientDetail from "@/pages/client-detail";
 import DocumentsPage from "@/pages/documents";
 import AnalysesPage from "@/pages/analyses";
 import AnalysisDetail from "@/pages/analysis-detail";
+import SettingsPage from "@/pages/settings";
+import AuditLogPage from "@/pages/audit-log";
 import NotFound from "@/pages/not-found";
 import { useEffect, useState } from "react";
 
@@ -32,6 +34,8 @@ function AppRouter() {
       <Route path="/documents" component={DocumentsPage} />
       <Route path="/analyses" component={AnalysesPage} />
       <Route path="/analyses/:id" component={AnalysisDetail} />
+      <Route path="/settings" component={SettingsPage} />
+      <Route path="/audit-log" component={AuditLogPage} />
       <Route component={NotFound} />
     </Switch>
   );

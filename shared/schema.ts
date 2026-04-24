@@ -78,3 +78,28 @@ export interface Finding {
   recommendation: string;
   resolved: boolean;
 }
+
+// ─── Audit Logs ────────────────────────────────────────────────────────────
+export const auditLogs = sqliteTable("audit_logs", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  userId: integer("user_id"),
+  userEmail: text("user_email").notNull().default("system"),
+  action: text("action").notNull(),
+  resource: text("resource"),
+  details: text("details"),
+  ipAddress: text("ip_address"),
+  success: integer("success").notNull().default(1), // 1=true, 0=false
+  createdAt: text("created_at").notNull().default(new Date().toISOString()),
+});
+
+export type AuditLog = typeof auditLogs.$inferSelect;
+
+// ─── Settings ──────────────────────────────────────────────────────────────
+export const settings = sqliteTable("settings", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  key: text("key").notNull().unique(),
+  value: text("value").notNull(),
+  updatedAt: text("updated_at").notNull().default(new Date().toISOString()),
+});
+
+export type Setting = typeof settings.$inferSelect;

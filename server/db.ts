@@ -55,6 +55,43 @@ sqlite.exec(`
   );
 `);
 
+// New tables for security layer
+sqlite.exec(`
+  CREATE TABLE IF NOT EXISTS audit_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    user_email TEXT NOT NULL DEFAULT 'system',
+    action TEXT NOT NULL,
+    resource TEXT,
+    details TEXT,
+    ip_address TEXT,
+    success INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS settings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    key TEXT NOT NULL UNIQUE,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+`);
+
+// Seed default settings
+const defaultSettings = [
+  { key: "ai_provider", value: "perplexity" }, // "perplexity" | "ollama"
+  { key: "ollama_url", value: "http://localhost:11434" },
+  { key: "ollama_model", value: "llama3" },
+  { key: "data_retention_days", value: "365" },
+  { key: "encryption_enabled", value: "true" },
+];
+for (const s of defaultSettings) {
+  const exists = sqlite.prepare("SELECT id FROM settings WHERE key = ?").get(s.key);
+  if (!exists) {
+    sqlite.prepare("INSERT INTO settings (key, value) VALUES (?, ?)").run(s.key, s.value);
+  }
+}
+
 // Seed admin account if not exists
 const existingAdmin = sqlite.prepare("SELECT id FROM users WHERE email = ?").get("admin@labaudit.ai");
 if (!existingAdmin) {

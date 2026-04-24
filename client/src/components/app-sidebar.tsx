@@ -4,7 +4,7 @@ import {
   SidebarGroupLabel, SidebarMenu, SidebarMenuButton, SidebarMenuItem,
   SidebarHeader, SidebarFooter,
 } from "@/components/ui/sidebar";
-import { LayoutDashboard, Users, FileText, BarChart2, Settings, LogOut, FlaskConical } from "lucide-react";
+import { LayoutDashboard, Users, FileText, BarChart2, Settings, LogOut, Shield } from "lucide-react";
 import { useAuth } from "@/lib/auth";
 import { Button } from "./ui/button";
 
@@ -13,6 +13,11 @@ const adminNav = [
   { title: "Clients", url: "/clients", icon: Users },
   { title: "Documents", url: "/documents", icon: FileText },
   { title: "Analyses", url: "/analyses", icon: BarChart2 },
+];
+
+const adminSecurityNav = [
+  { title: "Audit Log", url: "/audit-log", icon: Shield },
+  { title: "Settings", url: "/settings", icon: Settings },
 ];
 
 const clientNav = [
@@ -64,6 +69,26 @@ export function AppSidebar() {
             </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>
+
+        {user?.role === "admin" && (
+          <SidebarGroup>
+            <SidebarGroupLabel>Security</SidebarGroupLabel>
+            <SidebarGroupContent>
+              <SidebarMenu>
+                {adminSecurityNav.map((item) => (
+                  <SidebarMenuItem key={item.title}>
+                    <SidebarMenuButton asChild isActive={location === item.url}>
+                      <Link href={item.url}>
+                        <item.icon className="w-4 h-4" />
+                        <span>{item.title}</span>
+                      </Link>
+                    </SidebarMenuButton>
+                  </SidebarMenuItem>
+                ))}
+              </SidebarMenu>
+            </SidebarGroupContent>
+          </SidebarGroup>
+        )}
       </SidebarContent>
 
       <SidebarFooter className="border-t border-sidebar-border p-3">
