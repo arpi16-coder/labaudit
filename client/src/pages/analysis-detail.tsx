@@ -73,11 +73,30 @@ export default function AnalysisDetail() {
 
   const downloadSOP = () => {
     if (!analysis?.sopDraft) return;
-    const blob = new Blob([analysis.sopDraft], { type: "text/plain" });
+    const watermark = [
+      "================================================================",
+      "  LABAUDIT.AI — BETA VERSION",
+      "  FOR EVALUATION PURPOSES ONLY",
+      "  This document is generated during the beta testing period.",
+      "  It may not be used, distributed, or relied upon for any",
+      "  official, regulatory, or commercial purpose.",
+      "  © 2026 LabAudit.ai — All rights reserved.",
+      "================================================================",
+      "",
+    ].join("\n");
+    const footer = [
+      "",
+      "================================================================",
+      "  BETA WATERMARK — NOT FOR OFFICIAL USE",
+      `  Generated: ${new Date().toUTCString()}`,
+      "  LabAudit.ai Beta | labaudit-production.up.railway.app",
+      "================================================================",
+    ].join("\n");
+    const blob = new Blob([watermark + analysis.sopDraft + footer], { type: "text/plain" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `SOP-Draft-${analysis.id}-${Date.now()}.txt`;
+    a.download = `BETA-SOP-Draft-${analysis.id}-${Date.now()}.txt`;
     a.click();
     URL.revokeObjectURL(url);
   };

@@ -213,3 +213,33 @@
     inset: -1px;
   }
 }
+
+/* ── Beta print watermark ───────────────────────────────────────────── */
+@media print {
+  body::before {
+    content: "LABAUDIT.AI BETA — FOR EVALUATION PURPOSES ONLY — NOT FOR OFFICIAL USE";
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%) rotate(-35deg);
+    font-size: 2.2rem;
+    font-weight: 800;
+    color: rgba(0, 0, 0, 0.08);
+    white-space: nowrap;
+    pointer-events: none;
+    z-index: 9999;
+    letter-spacing: 0.05em;
+  }
+  body::after {
+    content: "© 2026 LabAudit.ai Beta — labaudit-production.up.railway.app — Generated: " attr(data-print-date);
+    position: fixed;
+    bottom: 0.5rem;
+    left: 0;
+    right: 0;
+    text-align: center;
+    font-size: 0.65rem;
+    color: rgba(0, 0, 0, 0.4);
+    pointer-events: none;
+    z-index: 9999;
+  }
+}
