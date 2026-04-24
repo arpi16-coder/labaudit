@@ -1,3 +1,6 @@
+[phases.setup]
+apt = ["ghostscript"]
+
 [phases.build]
 cmds = ["npm install", "npm run build"]
 
