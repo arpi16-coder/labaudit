@@ -23,12 +23,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [isLoading, setIsLoading] = useState(true); // start true — restoring session
 
+  // Token in-memory store (no localStorage/sessionStorage needed — JWT cookie is primary)
+  // sessionStorage used as optional fallback only when cookies are blocked (e.g., preview envs)
+  const trySessionStorage = (fn: () => string | null): string | null => {
+    try { return fn(); } catch { return null; }
+  };
+  const saveToken = (t: string) => { try { sessionStorage.setItem("labaudit_token", t); } catch {} };
+  const clearToken = () => { try { sessionStorage.removeItem("labaudit_token"); } catch {} };
+  const getToken = () => trySessionStorage(() => sessionStorage.getItem("labaudit_token"));
+
   // Restore session on mount via /api/auth/me (JWT cookie)
   useEffect(() => {
     const restore = async () => {
       try {
-        // Check for stored token in sessionStorage as fallback
-        const storedToken = sessionStorage.getItem("labaudit_token");
+        const storedToken = getToken();
         const headers: Record<string, string> = {};
         if (storedToken) headers["Authorization"] = `Bearer ${storedToken}`;
 
@@ -52,8 +60,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       const res = await apiRequest("POST", "/api/auth/login", { email, password });
       const data = await res.json();
       if (data.message) throw new Error(data.message);
-      // Store token in sessionStorage as fallback for environments that block cookies
-      if (data.token) sessionStorage.setItem("labaudit_token", data.token);
+      if (data.token) saveToken(data.token);
       const { token: _, password: __, ...safeUser } = data;
       setUser(safeUser as AuthUser);
     } finally {
@@ -66,16 +73,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       const res = await apiRequest("POST", "/api/auth/beta-access", {});
       const data = await res.json();
-      if (data.token) sessionStorage.setItem("labaudit_token", data.token);
-      // Fetch the real user object
-      const storedToken = data.token;
+      if (data.token) saveToken(data.token);
       const headers: Record<string, string> = {};
-      if (storedToken) headers["Authorization"] = `Bearer ${storedToken}`;
+      if (data.token) headers["Authorization"] = `Bearer ${data.token}`;
       const meRes = await fetch("/api/auth/me", { credentials: "include", headers });
       if (meRes.ok) {
         setUser(await meRes.json());
       } else {
-        // Fallback guest object
         setUser({ id: 1, email: "admin@labaudit.ai", name: "Admin", role: "admin" });
       }
     } catch {
@@ -87,7 +91,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       await apiRequest("POST", "/api/auth/logout", {});
     } catch {}
-    sessionStorage.removeItem("labaudit_token");
+    clearToken();
     setUser(null);
   };
 
