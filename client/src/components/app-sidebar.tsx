@@ -168,9 +168,20 @@ export function AppSidebar() {
           <LogOut className="w-4 h-4" />
           Sign out
         </Button>
-        <p className="text-[10px] text-muted-foreground/50 text-center px-2 pt-1 select-none">
-          © {new Date().getFullYear()} LabAudit.ai. All rights reserved.
-        </p>
+        <div className="text-[10px] text-muted-foreground/50 text-center px-2 pt-1 space-y-0.5">
+          <p className="select-none">© {new Date().getFullYear()} LabAudit.ai. All rights reserved.</p>
+          <p>
+            Built by{" "}
+            <a
+              href="https://www.linkedin.com/in/arpita-sathya"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline underline-offset-2 hover:text-muted-foreground transition-colors"
+            >
+              Arpita Sathya
+            </a>
+          </p>
+        </div>
       </SidebarFooter>
     </Sidebar>
   );
