@@ -682,6 +682,90 @@ export async function registerRoutes(httpServer: Server, app: Express) {
     return res.json(analysis);
   });
 
+  // ── AI Document Correction ────────────────────────────────────────────────
+  // Accepts current doc content + findings, returns AI-corrected document text
+  app.post("/api/analyses/:id/correct-document", requireAuth, async (req, res) => {
+    const analysis = storage.getAnalysisById(Number(req.params.id));
+    if (!analysis) return res.status(404).json({ message: "Analysis not found" });
+
+    const { currentContent, instruction } = req.body;
+    const findings: Finding[] = (() => {
+      try { return JSON.parse(analysis.findings || "[]"); } catch { return []; }
+    })();
+
+    const findingsSummary = findings
+      .filter(f => !f.resolved)
+      .map(f => `[${f.severity.toUpperCase()}] ${f.description} → ${f.recommendation}`)
+      .join("\n");
+
+    const prompt = `You are an expert GMP/GLP regulatory compliance editor. A compliance gap analysis has identified the following issues in the document below. Your task is to produce a fully corrected version of the document that addresses all findings.
+
+Findings to address:
+${findingsSummary || "No specific findings — generally improve compliance formatting and completeness."}
+
+${instruction ? `Additional instruction from the user: ${instruction}\n\n` : ""}
+Return ONLY the corrected document text. No explanations, no markdown fences, no prefixes — just the corrected document starting immediately.
+
+Original document to correct:
+${(currentContent || analysis.sopDraft || "").substring(0, 8000)}`;
+
+    try {
+      const provider = getSetting("ai_provider") || "groq";
+      let correctedText = "";
+
+      if (provider === "groq" && process.env.GROQ_API_KEY) {
+        const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+        const completion = await groq.chat.completions.create({
+          model: "llama-3.1-8b-instant",
+          messages: [{ role: "user", content: prompt }],
+          temperature: 0.15,
+          max_tokens: 4000,
+        });
+        correctedText = completion.choices?.[0]?.message?.content || "";
+      } else if (provider === "ollama") {
+        const ollamaUrl = getSetting("ollama_url") || "http://localhost:11434";
+        const model = getSetting("ollama_model") || "llama3";
+        const resp = await fetch(`${ollamaUrl}/api/generate`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model, prompt, stream: false }),
+          signal: AbortSignal.timeout(120000),
+        });
+        const data = await resp.json() as any;
+        correctedText = data.response || "";
+      } else if (provider === "perplexity" && process.env.PERPLEXITY_API_KEY) {
+        const resp = await fetch("https://api.perplexity.ai/chat/completions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${process.env.PERPLEXITY_API_KEY}` },
+          body: JSON.stringify({
+            model: "llama-3.1-sonar-large-128k-online",
+            messages: [{ role: "user", content: prompt }],
+            temperature: 0.15,
+            max_tokens: 4000,
+          }),
+        });
+        const data = await resp.json() as any;
+        correctedText = data.choices?.[0]?.message?.content || "";
+      } else {
+        // Fallback: return sopDraft as-is with a note
+        correctedText = (analysis.sopDraft || currentContent || "") +
+          "\n\n[Note: AI correction requires a configured AI provider (Groq/Ollama/Perplexity). Configure in Settings.]"
+      }
+
+      logAudit({
+        action: "document_ai_correct",
+        resource: `analysis:${req.params.id}`,
+        success: true,
+        ipAddress: getIP(req),
+      });
+
+      return res.json({ correctedText: correctedText.trim() });
+    } catch (err: any) {
+      console.error("AI correction error:", err);
+      return res.status(500).json({ message: "AI correction failed", error: err.message });
+    }
+  });
+
   // ── Stats ─────────────────────────────────────────────────────────────────
   app.get("/api/stats", (_req, res) => {
     const allClients = storage.getAllClients();
