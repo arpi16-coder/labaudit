@@ -168,6 +168,9 @@ export function AppSidebar() {
           <LogOut className="w-4 h-4" />
           Sign out
         </Button>
+        <p className="text-[10px] text-muted-foreground/50 text-center px-2 pt-1 select-none">
+          © {new Date().getFullYear()} LabAudit.ai. All rights reserved.
+        </p>
       </SidebarFooter>
     </Sidebar>
   );
