@@ -3,7 +3,7 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 
 const BETA_CODE = "LABAUDIT-BETA";
-const BETA_EXPIRY = new Date("2026-05-30T23:59:59Z");
+const BETA_EXPIRY = new Date("2026-04-30T23:59:59Z");
 
 interface BetaGateProps {
   onAccess: () => void;
@@ -94,7 +94,7 @@ export default function BetaGate({ onAccess }: BetaGateProps) {
         </div>
 
         <p className="text-xs text-muted-foreground text-center mt-4">
-          © 2026 LabAudit.ai · Beta program ends May 30, 2026
+          © 2026 LabAudit.ai · Beta program ends April 30, 2026
         </p>
       </div>
     </div>
