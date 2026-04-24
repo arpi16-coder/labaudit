@@ -1,5 +1,5 @@
 [phases.setup]
-apt = ["ghostscript"]
+apt = ["ghostscript", "tesseract-ocr", "tesseract-ocr-eng"]
 
 [phases.build]
 cmds = ["npm install", "npm run build"]
