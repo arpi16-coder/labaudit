@@ -3,7 +3,7 @@ import type { Server } from "http";
 import Groq from "groq-sdk";
 import { storage } from "./storage";
 import { encrypt, decrypt } from "./encryption";
-import { logAudit, getAuditLogs } from "./audit-logger";
+import { logAudit, getAuditLogs, clearAuditLogs } from "./audit-logger";
 import { db } from "./db";
 import { settings } from "@shared/schema";
 import { eq } from "drizzle-orm";
@@ -584,6 +584,12 @@ export async function registerRoutes(httpServer: Server, app: Express) {
     const action = req.query.action as string | undefined;
     const result = getAuditLogs({ limit, offset, action: action as any });
     return res.json(result);
+  });
+
+  app.delete("/api/audit-logs", (req, res) => {
+    const count = clearAuditLogs();
+    logAudit({ action: "settings_update", resource: "audit_log_clear", success: true, details: JSON.stringify({ cleared: count }) });
+    return res.json({ cleared: count });
   });
 
   // ── Settings ──────────────────────────────────────────────────────────────

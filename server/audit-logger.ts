@@ -48,6 +48,16 @@ export function logAudit(entry: AuditEntry): void {
   }
 }
 
+export function clearAuditLogs(): number {
+  try {
+    const result = db.delete(auditLogs).run();
+    return result.changes;
+  } catch (err) {
+    console.error("[AuditLog] Failed to clear logs:", err);
+    return 0;
+  }
+}
+
 export function getAuditLogs(options?: {
   limit?: number;
   offset?: number;

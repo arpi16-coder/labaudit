@@ -1,11 +1,13 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useMutation } from "@tanstack/react-query";
+import { queryClient, apiRequest } from "@/lib/queryClient";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Shield, Download, Search, CheckCircle, XCircle } from "lucide-react";
+import { Shield, Download, Search, CheckCircle, XCircle, Trash2 } from "lucide-react";
+import { useToast } from "@/hooks/use-toast";
 
 interface AuditLog {
   id: number;
@@ -49,6 +51,18 @@ function formatDate(iso: string) {
 export default function AuditLogPage() {
   const [search, setSearch] = useState("");
   const [actionFilter, setActionFilter] = useState("all");
+  const [confirmClear, setConfirmClear] = useState(false);
+  const { toast } = useToast();
+
+  const clearMutation = useMutation({
+    mutationFn: () => apiRequest("DELETE", "/api/audit-logs"),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/audit-logs"] });
+      setConfirmClear(false);
+      toast({ title: "Audit log cleared", description: "All log entries have been deleted." });
+    },
+    onError: () => toast({ title: "Error", description: "Failed to clear audit log.", variant: "destructive" }),
+  });
 
   const { data, isLoading } = useQuery<{ total: number; logs: AuditLog[] }>({
     queryKey: ["/api/audit-logs"],
@@ -99,9 +113,29 @@ export default function AuditLogPage() {
             {data && <span className="ml-1 font-medium">{data.total} total events.</span>}
           </p>
         </div>
-        <Button data-testid="button-export-audit" variant="outline" size="sm" onClick={exportCSV} disabled={filtered.length === 0}>
-          <Download className="w-3.5 h-3.5 mr-1.5" /> Export CSV
-        </Button>
+        <div className="flex gap-2">
+          <Button data-testid="button-export-audit" variant="outline" size="sm" onClick={exportCSV} disabled={filtered.length === 0}>
+            <Download className="w-3.5 h-3.5 mr-1.5" /> Export CSV
+          </Button>
+          {!confirmClear ? (
+            <Button data-testid="button-clear-audit" variant="outline" size="sm"
+              className="text-destructive border-destructive/40 hover:bg-destructive/10"
+              onClick={() => setConfirmClear(true)}
+              disabled={logs.length === 0}>
+              <Trash2 className="w-3.5 h-3.5 mr-1.5" /> Clear Log
+            </Button>
+          ) : (
+            <div className="flex items-center gap-1.5">
+              <span className="text-xs text-muted-foreground">Delete all {data?.total} entries?</span>
+              <Button data-testid="button-clear-audit-confirm" size="sm" variant="destructive"
+                onClick={() => clearMutation.mutate()}
+                disabled={clearMutation.isPending}>
+                {clearMutation.isPending ? "Clearing…" : "Yes, clear"}
+              </Button>
+              <Button size="sm" variant="ghost" onClick={() => setConfirmClear(false)}>Cancel</Button>
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Filters */}
