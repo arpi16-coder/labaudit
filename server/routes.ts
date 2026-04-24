@@ -1,5 +1,6 @@
 import type { Express, Request } from "express";
 import type { Server } from "http";
+import Groq from "groq-sdk";
 import { storage } from "./storage";
 import { encrypt, decrypt } from "./encryption";
 import { logAudit, getAuditLogs } from "./audit-logger";
@@ -68,6 +69,55 @@ ${docContent.substring(0, 6000)}`;
   return JSON.parse(jsonMatch[0]);
 }
 
+// ─── Groq analysis helper ────────────────────────────────────────────────────
+async function runGroqAnalysis(
+  docContent: string,
+  docType: string,
+  framework: string
+): Promise<{ score: number; summary: string; findings: Finding[]; sopDraft: string }> {
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) throw new Error("GROQ_API_KEY not set");
+
+  const groq = new Groq({ apiKey });
+
+  const systemPrompt = `You are an expert GMP/GLP regulatory compliance auditor with 20+ years experience in biotech and regenerative medicine labs. Perform a rigorous gap analysis on the provided laboratory document.
+
+Compliance framework: ${framework}
+Document type: ${docType}
+
+Return ONLY valid JSON with this exact structure (no markdown, no explanation, just JSON):
+{
+  "score": <number 0-100>,
+  "summary": "<2-3 sentence executive summary>",
+  "findings": [
+    {
+      "id": "<uuid string>",
+      "severity": "<critical|major|minor|info>",
+      "category": "<missing_field|formatting|terminology|signature|date|lot_number|procedure_gap|other>",
+      "description": "<specific issue found>",
+      "recommendation": "<specific corrective action>",
+      "resolved": false
+    }
+  ],
+  "sopDraft": "<full revised SOP draft with all gaps filled, properly formatted with sections: Purpose, Scope, Responsibilities, Procedure, References, Approval block>"
+}`;
+
+  const completion = await groq.chat.completions.create({
+    model: "llama-3.1-8b-instant",
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: `Analyze this ${docType} document for ${framework} compliance gaps:\n\n${docContent.substring(0, 8000)}` },
+    ],
+    temperature: 0.2,
+    max_tokens: 4000,
+  });
+
+  const text = completion.choices?.[0]?.message?.content || "";
+  const jsonMatch = text.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) throw new Error("No JSON in Groq response");
+  return JSON.parse(jsonMatch[0]);
+}
+
 // ─── Perplexity API analysis helper ──────────────────────────────────────────
 async function runPerplexityAnalysis(
   docContent: string,
@@ -130,13 +180,16 @@ async function runGapAnalysis(
   docType: string,
   framework: string
 ): Promise<{ score: number; summary: string; findings: Finding[]; sopDraft: string }> {
-  const provider = getSetting("ai_provider") || "perplexity";
+  const provider = getSetting("ai_provider") || "groq";
 
   try {
     if (provider === "ollama") {
       return await runOllamaAnalysis(docContent, docType, framework);
-    } else {
+    } else if (provider === "perplexity") {
       return await runPerplexityAnalysis(docContent, docType, framework);
+    } else {
+      // Default: Groq
+      return await runGroqAnalysis(docContent, docType, framework);
     }
   } catch (err) {
     console.error(`AI analysis error (${provider}):`, err);

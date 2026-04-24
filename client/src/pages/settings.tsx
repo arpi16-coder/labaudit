@@ -95,19 +95,25 @@ export default function SettingsPage() {
           <CardTitle className="text-base flex items-center gap-2">
             <Brain className="w-4 h-4 text-primary" /> AI Analysis Provider
           </CardTitle>
-          <CardDescription>Choose between Perplexity API (cloud) or Ollama (on-premise, no data leaves your server).</CardDescription>
+          <CardDescription>Choose between Groq API (fast cloud inference), Perplexity API, or Ollama (on-premise, no data leaves your server).</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="space-y-1.5">
             <Label>Provider</Label>
             <Select
-              value={effectiveSettings.ai_provider || "perplexity"}
+              value={effectiveSettings.ai_provider || "groq"}
               onValueChange={(v) => set("ai_provider", v)}
             >
               <SelectTrigger data-testid="select-ai-provider">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
+                <SelectItem value="groq">
+                  <div className="flex items-center gap-2">
+                    Groq API
+                    <Badge variant="secondary" className="text-xs">Cloud · Fast</Badge>
+                  </div>
+                </SelectItem>
                 <SelectItem value="perplexity">
                   <div className="flex items-center gap-2">
                     Perplexity API
@@ -124,9 +130,15 @@ export default function SettingsPage() {
             </Select>
           </div>
 
-          {(effectiveSettings.ai_provider || "perplexity") === "perplexity" && (
+          {(effectiveSettings.ai_provider || "groq") === "groq" && (
             <div className="rounded-md bg-muted/50 border border-border p-3 text-xs text-muted-foreground">
-              <p>Set <code className="text-foreground">PERPLEXITY_API_KEY</code> env var on your server. Document text is sent to Perplexity's servers for analysis.</p>
+              <p>Set <code className="text-foreground">GROQ_API_KEY</code> env var on your server. Uses <strong>llama-3.1-8b-instant</strong> — fast, free tier available at <a href="https://console.groq.com" target="_blank" rel="noopener noreferrer" className="text-primary underline">console.groq.com</a>.</p>
+            </div>
+          )}
+
+          {effectiveSettings.ai_provider === "perplexity" && (
+            <div className="rounded-md bg-muted/50 border border-border p-3 text-xs text-muted-foreground">
+              <p>Set <code className="text-foreground">PERPLEXITY_API_KEY</code> env var on your server. Uses <strong>llama-3.1-sonar-small-128k-online</strong>. Document text is sent to Perplexity's servers for analysis.</p>
             </div>
           )}
 

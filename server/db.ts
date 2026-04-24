@@ -79,7 +79,7 @@ sqlite.exec(`
 
 // Seed default settings
 const defaultSettings = [
-  { key: "ai_provider", value: "perplexity" }, // "perplexity" | "ollama"
+  { key: "ai_provider", value: "groq" }, // "groq" | "perplexity" | "ollama"
   { key: "ollama_url", value: "http://localhost:11434" },
   { key: "ollama_model", value: "llama3" },
   { key: "data_retention_days", value: "365" },

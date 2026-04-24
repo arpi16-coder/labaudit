@@ -54,6 +54,7 @@
     "express": "^5.0.1",
     "express-session": "^1.18.1",
     "framer-motion": "^11.13.1",
+    "groq-sdk": "^1.1.2",
     "helmet": "^8.1.0",
     "input-otp": "^1.4.2",
     "lucide-react": "^0.453.0",
