@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useCallback, useRef } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useParams, Link, useLocation } from "wouter";
 import { queryClient, apiRequest } from "@/lib/queryClient";
@@ -11,16 +11,386 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Separator } from "@/components/ui/separator";
 import { useToast } from "@/hooks/use-toast";
 import {
   ArrowLeft, CheckCircle2, AlertTriangle, Info, XCircle,
   FileText, Download, RefreshCw, Circle, Plus, Wand2,
-  Loader2, Copy, RotateCcw, Sparkles, PenLine
+  Loader2, Copy, RotateCcw, Sparkles, PenLine,
+  History, GitCompare, ChevronDown, ChevronRight, Bookmark,
+  Clock, Cpu, User, OrigamiIcon
 } from "lucide-react";
 import type { Analysis } from "@shared/schema";
 import type { Finding } from "@shared/schema";
 import { RadarChart, Radar, PolarGrid, PolarAngleAxis, ResponsiveContainer, Tooltip } from "recharts";
 
+// ── Types ─────────────────────────────────────────────────────────────────────
+type SnapshotType = "original" | "ai" | "manual";
+
+interface VersionSnapshot {
+  id: string;
+  label: string;
+  type: SnapshotType;
+  timestamp: Date;
+  content: string;
+  instruction?: string;
+  charCount: number;
+  lineCount: number;
+}
+
+// ── Diff engine (line-level LCS) ──────────────────────────────────────────────
+type DiffLine = { type: "same" | "added" | "removed"; text: string };
+
+function computeDiff(oldText: string, newText: string): DiffLine[] {
+  const oldLines = oldText.split("\n");
+  const newLines = newText.split("\n");
+
+  // LCS table
+  const m = oldLines.length;
+  const n = newLines.length;
+  // Cap at 500 lines each to keep it snappy
+  const A = oldLines.slice(0, 500);
+  const B = newLines.slice(0, 500);
+  const am = A.length;
+  const bn = B.length;
+
+  const dp: number[][] = Array.from({ length: am + 1 }, () => new Array(bn + 1).fill(0));
+  for (let i = am - 1; i >= 0; i--) {
+    for (let j = bn - 1; j >= 0; j--) {
+      if (A[i] === B[j]) {
+        dp[i][j] = 1 + dp[i + 1][j + 1];
+      } else {
+        dp[i][j] = Math.max(dp[i + 1][j], dp[i][j + 1]);
+      }
+    }
+  }
+
+  const result: DiffLine[] = [];
+  let i = 0, j = 0;
+  while (i < am && j < bn) {
+    if (A[i] === B[j]) {
+      result.push({ type: "same", text: A[i] });
+      i++; j++;
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      result.push({ type: "removed", text: A[i] });
+      i++;
+    } else {
+      result.push({ type: "added", text: B[j] });
+      j++;
+    }
+  }
+  while (i < am) { result.push({ type: "removed", text: A[i++] }); }
+  while (j < bn) { result.push({ type: "added", text: B[j++] }); }
+
+  // Append any lines beyond cap as "same" (approximation)
+  for (let k = 500; k < oldLines.length; k++) result.push({ type: "removed", text: oldLines[k] });
+  for (let k = 500; k < newLines.length; k++) result.push({ type: "added", text: newLines[k] });
+
+  return result;
+}
+
+function diffStats(diff: DiffLine[]) {
+  return {
+    added: diff.filter(d => d.type === "added").length,
+    removed: diff.filter(d => d.type === "removed").length,
+    same: diff.filter(d => d.type === "same").length,
+  };
+}
+
+// ── Snapshot type pill ────────────────────────────────────────────────────────
+function TypePill({ type }: { type: SnapshotType }) {
+  if (type === "original") return (
+    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-muted text-muted-foreground">
+      <FileText className="w-2.5 h-2.5" /> Original
+    </span>
+  );
+  if (type === "ai") return (
+    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-primary/10 text-primary">
+      <Cpu className="w-2.5 h-2.5" /> AI
+    </span>
+  );
+  return (
+    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-orange-100 dark:bg-orange-900/30 text-orange-700 dark:text-orange-400">
+      <User className="w-2.5 h-2.5" /> Manual
+    </span>
+  );
+}
+
+// ── Diff viewer ───────────────────────────────────────────────────────────────
+function DiffViewer({ leftSnap, rightSnap }: { leftSnap: VersionSnapshot; rightSnap: VersionSnapshot }) {
+  const diff = computeDiff(leftSnap.content, rightSnap.content);
+  const stats = diffStats(diff);
+  const unchanged = stats.same === diff.length;
+
+  return (
+    <div className="space-y-3">
+      {/* Stats bar */}
+      <div className="flex items-center gap-3 text-xs">
+        <span className="text-muted-foreground">Comparing</span>
+        <TypePill type={leftSnap.type} />
+        <span className="font-medium text-muted-foreground truncate max-w-[120px]">{leftSnap.label}</span>
+        <span className="text-muted-foreground">→</span>
+        <TypePill type={rightSnap.type} />
+        <span className="font-medium text-muted-foreground truncate max-w-[120px]">{rightSnap.label}</span>
+        <div className="flex items-center gap-2 ml-auto shrink-0">
+          {stats.added > 0 && (
+            <span className="text-green-600 dark:text-green-400 font-mono">+{stats.added}</span>
+          )}
+          {stats.removed > 0 && (
+            <span className="text-red-500 font-mono">−{stats.removed}</span>
+          )}
+          {unchanged && (
+            <span className="text-muted-foreground">No differences</span>
+          )}
+        </div>
+      </div>
+
+      {unchanged ? (
+        <div className="text-center py-8 border border-dashed border-border rounded-lg">
+          <CheckCircle2 className="w-6 h-6 text-muted-foreground/40 mx-auto mb-2" />
+          <p className="text-sm text-muted-foreground">These two versions are identical.</p>
+        </div>
+      ) : (
+        <div className="border border-border rounded-lg overflow-hidden">
+          {/* Side-by-side header */}
+          <div className="grid grid-cols-2 border-b border-border bg-muted/40">
+            <div className="px-3 py-2 flex items-center gap-2 border-r border-border">
+              <TypePill type={leftSnap.type} />
+              <span className="text-xs font-medium truncate">{leftSnap.label}</span>
+              <span className="text-[10px] text-muted-foreground ml-auto shrink-0">
+                {leftSnap.charCount.toLocaleString()} chars
+              </span>
+            </div>
+            <div className="px-3 py-2 flex items-center gap-2">
+              <TypePill type={rightSnap.type} />
+              <span className="text-xs font-medium truncate">{rightSnap.label}</span>
+              <span className="text-[10px] text-muted-foreground ml-auto shrink-0">
+                {rightSnap.charCount.toLocaleString()} chars
+              </span>
+            </div>
+          </div>
+
+          {/* Diff lines — side by side */}
+          <ScrollArea className="h-[420px]">
+            <div className="font-mono text-[11px] leading-5">
+              {/* Build paired rows: for each removed line pair it with the next added if contiguous */}
+              {buildSideBySideRows(diff).map((row, idx) => (
+                <div key={idx} className="grid grid-cols-2 border-b border-border/40 last:border-0">
+                  {/* Left */}
+                  <div className={`px-3 py-0.5 border-r border-border/40 whitespace-pre-wrap break-all min-h-[22px] ${
+                    row.left?.type === "removed"
+                      ? "bg-red-50 dark:bg-red-950/20 text-red-700 dark:text-red-400"
+                      : row.left?.type === "same"
+                      ? "text-foreground"
+                      : "bg-muted/20 text-muted-foreground/30"
+                  }`}>
+                    {row.left?.type === "removed" && <span className="select-none mr-1 opacity-60">−</span>}
+                    {row.left?.type === "same" && <span className="select-none mr-1 opacity-30"> </span>}
+                    {row.left ? row.left.text || "\u00a0" : ""}
+                  </div>
+                  {/* Right */}
+                  <div className={`px-3 py-0.5 whitespace-pre-wrap break-all min-h-[22px] ${
+                    row.right?.type === "added"
+                      ? "bg-green-50 dark:bg-green-950/20 text-green-700 dark:text-green-400"
+                      : row.right?.type === "same"
+                      ? "text-foreground"
+                      : "bg-muted/20 text-muted-foreground/30"
+                  }`}>
+                    {row.right?.type === "added" && <span className="select-none mr-1 opacity-60">+</span>}
+                    {row.right?.type === "same" && <span className="select-none mr-1 opacity-30"> </span>}
+                    {row.right ? row.right.text || "\u00a0" : ""}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </ScrollArea>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Build side-by-side row pairs from a flat diff
+function buildSideBySideRows(diff: DiffLine[]): Array<{ left?: DiffLine; right?: DiffLine }> {
+  const rows: Array<{ left?: DiffLine; right?: DiffLine }> = [];
+  let i = 0;
+  while (i < diff.length) {
+    const cur = diff[i];
+    if (cur.type === "same") {
+      rows.push({ left: cur, right: cur });
+      i++;
+    } else if (cur.type === "removed") {
+      // Peek ahead: if next is "added", pair them
+      if (i + 1 < diff.length && diff[i + 1].type === "added") {
+        rows.push({ left: cur, right: diff[i + 1] });
+        i += 2;
+      } else {
+        rows.push({ left: cur, right: undefined });
+        i++;
+      }
+    } else {
+      // standalone "added"
+      rows.push({ left: undefined, right: cur });
+      i++;
+    }
+  }
+  return rows;
+}
+
+// ── Version history panel ─────────────────────────────────────────────────────
+function VersionHistoryPanel({
+  snapshots,
+  activeId,
+  onRestore,
+  onCompare,
+  compareIds,
+  onSetCompare,
+}: {
+  snapshots: VersionSnapshot[];
+  activeId: string;
+  onRestore: (snap: VersionSnapshot) => void;
+  onCompare: (a: string, b: string) => void;
+  compareIds: [string, string] | null;
+  onSetCompare: (ids: [string, string] | null) => void;
+}) {
+  const [selectingCompare, setSelectingCompare] = useState<string | null>(null);
+
+  const handleCompareClick = (id: string) => {
+    if (!selectingCompare) {
+      setSelectingCompare(id);
+    } else if (selectingCompare === id) {
+      setSelectingCompare(null);
+    } else {
+      onCompare(selectingCompare, id);
+      setSelectingCompare(null);
+    }
+  };
+
+  const cancelCompare = () => {
+    setSelectingCompare(null);
+    onSetCompare(null);
+  };
+
+  return (
+    <div className="border border-border rounded-lg overflow-hidden bg-card">
+      <div className="flex items-center justify-between px-3 py-2 border-b border-border bg-muted/30">
+        <div className="flex items-center gap-1.5">
+          <History className="w-3.5 h-3.5 text-muted-foreground" />
+          <span className="text-xs font-medium">Version History</span>
+          <span className="text-[10px] text-muted-foreground bg-muted rounded-full px-1.5 py-0.5 ml-1">
+            {snapshots.length}
+          </span>
+        </div>
+        {selectingCompare ? (
+          <div className="flex items-center gap-1.5">
+            <span className="text-[10px] text-primary animate-pulse">Select another version to compare</span>
+            <Button variant="ghost" size="sm" className="h-5 text-[10px] px-1.5" onClick={cancelCompare}>
+              Cancel
+            </Button>
+          </div>
+        ) : compareIds ? (
+          <Button variant="ghost" size="sm" className="h-5 text-[10px] px-1.5 text-muted-foreground" onClick={cancelCompare}>
+            Close diff
+          </Button>
+        ) : null}
+      </div>
+
+      <ScrollArea className="max-h-64">
+        <div className="divide-y divide-border/60">
+          {snapshots.map((snap, idx) => {
+            const isActive = snap.id === activeId;
+            const isInCompare = compareIds?.includes(snap.id);
+            const isSelectingThis = selectingCompare === snap.id;
+
+            return (
+              <div
+                key={snap.id}
+                className={`group flex items-start gap-2.5 px-3 py-2.5 transition-colors cursor-default ${
+                  isActive
+                    ? "bg-primary/5 border-l-2 border-l-primary"
+                    : isInCompare
+                    ? "bg-blue-50/50 dark:bg-blue-950/20 border-l-2 border-l-blue-400"
+                    : isSelectingThis
+                    ? "bg-primary/8 border-l-2 border-l-primary/60 ring-1 ring-inset ring-primary/20"
+                    : "hover:bg-muted/30"
+                }`}
+                data-testid={`version-snap-${snap.id}`}
+              >
+                {/* Timeline dot */}
+                <div className="flex flex-col items-center shrink-0 mt-0.5">
+                  <div className={`w-2 h-2 rounded-full mt-0.5 ${
+                    snap.type === "original"
+                      ? "bg-muted-foreground/40"
+                      : snap.type === "ai"
+                      ? "bg-primary"
+                      : "bg-orange-500"
+                  }`} />
+                  {idx < snapshots.length - 1 && (
+                    <div className="w-px flex-1 bg-border/60 mt-1 min-h-[12px]" />
+                  )}
+                </div>
+
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <TypePill type={snap.type} />
+                    <span className="text-xs font-medium truncate max-w-[160px]">{snap.label}</span>
+                    {isActive && (
+                      <span className="text-[10px] text-primary font-medium ml-auto shrink-0">current</span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2 mt-0.5">
+                    <span className="text-[10px] text-muted-foreground">
+                      {snap.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                    </span>
+                    <span className="text-[10px] text-muted-foreground">·</span>
+                    <span className="text-[10px] text-muted-foreground">{snap.charCount.toLocaleString()} chars</span>
+                    <span className="text-[10px] text-muted-foreground">·</span>
+                    <span className="text-[10px] text-muted-foreground">{snap.lineCount} lines</span>
+                  </div>
+                  {snap.instruction && (
+                    <p className="text-[10px] text-muted-foreground mt-0.5 italic truncate">"{snap.instruction}"</p>
+                  )}
+                  {/* Actions */}
+                  <div className="flex items-center gap-1 mt-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                    {!isActive && (
+                      <Button
+                        variant="ghost" size="sm"
+                        className="h-5 text-[10px] px-1.5 text-muted-foreground hover:text-foreground"
+                        onClick={() => onRestore(snap)}
+                        data-testid={`button-restore-${snap.id}`}
+                      >
+                        <RotateCcw className="w-2.5 h-2.5 mr-1" /> Restore
+                      </Button>
+                    )}
+                    <Button
+                      variant="ghost" size="sm"
+                      className={`h-5 text-[10px] px-1.5 ${
+                        isSelectingThis
+                          ? "text-primary"
+                          : isInCompare
+                          ? "text-blue-600 dark:text-blue-400"
+                          : "text-muted-foreground hover:text-foreground"
+                      }`}
+                      onClick={() => handleCompareClick(snap.id)}
+                      data-testid={`button-compare-${snap.id}`}
+                    >
+                      <GitCompare className="w-2.5 h-2.5 mr-1" />
+                      {isSelectingThis ? "Selected" : isInCompare ? "In diff" : "Compare"}
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </ScrollArea>
+    </div>
+  );
+}
+
+// ── Severity helpers ──────────────────────────────────────────────────────────
 function SeverityIcon({ severity }: { severity: Finding["severity"] }) {
   if (severity === "critical") return <XCircle className="w-4 h-4 text-red-500 shrink-0" />;
   if (severity === "major") return <AlertTriangle className="w-4 h-4 text-yellow-500 shrink-0" />;
@@ -53,6 +423,7 @@ const CATEGORY_LABELS: Record<string, string> = {
   other: "Other",
 };
 
+// ── Compliance radar ──────────────────────────────────────────────────────────
 function ComplianceRadar({ findings, score }: { findings: Finding[]; score: number }) {
   const categories = [
     { label: "Signatures", key: "signature" },
@@ -93,17 +464,44 @@ function ComplianceRadar({ findings, score }: { findings: Finding[]; score: numb
   );
 }
 
-// ── AI Document Editor Component ──────────────────────────────────────────────
+// ── AI Document Editor ────────────────────────────────────────────────────────
+function makeSnap(
+  label: string,
+  type: SnapshotType,
+  content: string,
+  instruction?: string
+): VersionSnapshot {
+  return {
+    id: Math.random().toString(36).slice(2),
+    label,
+    type,
+    timestamp: new Date(),
+    content,
+    instruction,
+    charCount: content.length,
+    lineCount: content.split("\n").length,
+  };
+}
+
 function AIDocumentEditor({ analysis, findings }: { analysis: Analysis; findings: Finding[] }) {
   const { toast } = useToast();
-  const [editorContent, setEditorContent] = useState<string>(analysis.sopDraft || "");
-  const [instruction, setInstruction] = useState("");
-  const [originalContent] = useState<string>(analysis.sopDraft || "");
-  const [hasChanges, setHasChanges] = useState(false);
-  const [aiVersion, setAiVersion] = useState<string | null>(null);
 
+  const originalSnap = useRef<VersionSnapshot>(
+    makeSnap("Original SOP Draft", "original", analysis.sopDraft || "")
+  ).current;
+
+  const [snapshots, setSnapshots] = useState<VersionSnapshot[]>([originalSnap]);
+  const [activeId, setActiveId] = useState(originalSnap.id);
+  const [editorContent, setEditorContent] = useState(analysis.sopDraft || "");
+  const [instruction, setInstruction] = useState("");
+  const [isDirty, setIsDirty] = useState(false);
+  const [compareIds, setCompareIds] = useState<[string, string] | null>(null);
+  const [showHistory, setShowHistory] = useState(false);
+
+  const activeSnap = snapshots.find(s => s.id === activeId) ?? originalSnap;
   const unresolvedCount = findings.filter(f => !f.resolved).length;
 
+  // ── Mutation ──
   const correctMutation = useMutation({
     mutationFn: async () => {
       const res = await apiRequest("POST", `/api/analyses/${analysis.id}/correct-document`, {
@@ -113,13 +511,21 @@ function AIDocumentEditor({ analysis, findings }: { analysis: Analysis; findings
       return res.json();
     },
     onSuccess: (data: { correctedText: string }) => {
-      setAiVersion(data.correctedText);
+      const aiSnap = makeSnap(
+        instruction.trim() ? `AI: "${instruction.trim().slice(0, 40)}"` : `AI Correction #${snapshots.filter(s => s.type === "ai").length + 1}`,
+        "ai",
+        data.correctedText,
+        instruction.trim() || undefined
+      );
+      setSnapshots(prev => [...prev, aiSnap]);
+      setActiveId(aiSnap.id);
       setEditorContent(data.correctedText);
-      setHasChanges(true);
+      setIsDirty(false);
       setInstruction("");
+      setShowHistory(true);
       toast({
         title: "AI corrections applied",
-        description: `Document updated based on ${unresolvedCount} open finding${unresolvedCount !== 1 ? "s" : ""}.`,
+        description: `Saved as version "${aiSnap.label}".`,
       });
     },
     onError: () => {
@@ -129,13 +535,32 @@ function AIDocumentEditor({ analysis, findings }: { analysis: Analysis; findings
 
   const handleEditorChange = (val: string) => {
     setEditorContent(val);
-    setHasChanges(val !== originalContent);
+    setIsDirty(val !== activeSnap.content);
   };
 
-  const handleReset = () => {
-    setEditorContent(originalContent);
-    setAiVersion(null);
-    setHasChanges(false);
+  const handleSaveSnapshot = () => {
+    if (!isDirty) return;
+    const manualSnap = makeSnap(
+      `Manual Edit #${snapshots.filter(s => s.type === "manual").length + 1}`,
+      "manual",
+      editorContent
+    );
+    setSnapshots(prev => [...prev, manualSnap]);
+    setActiveId(manualSnap.id);
+    setIsDirty(false);
+    setShowHistory(true);
+    toast({ title: "Snapshot saved", description: `Saved as "${manualSnap.label}".` });
+  };
+
+  const handleRestore = (snap: VersionSnapshot) => {
+    setEditorContent(snap.content);
+    setActiveId(snap.id);
+    setIsDirty(false);
+    toast({ title: "Restored", description: `Editing "${snap.label}" now.` });
+  };
+
+  const handleCompare = (aId: string, bId: string) => {
+    setCompareIds([aId, bId]);
   };
 
   const handleCopy = () => {
@@ -144,7 +569,7 @@ function AIDocumentEditor({ analysis, findings }: { analysis: Analysis; findings
     });
   };
 
-  const handleDownload = () => {
+  const handleDownload = (content: string, label: string) => {
     const watermark = [
       "================================================================",
       "  LABAUDIT.AI — BETA VERSION",
@@ -160,35 +585,39 @@ function AIDocumentEditor({ analysis, findings }: { analysis: Analysis; findings
       "",
       "================================================================",
       "  BETA WATERMARK — NOT FOR OFFICIAL USE",
+      `  Version: ${label}`,
       `  Generated: ${new Date().toUTCString()}`,
       "  LabAudit.ai Beta | labaudit-production.up.railway.app",
       "================================================================",
     ].join("\n");
-    const blob = new Blob([watermark + editorContent + footer], { type: "text/plain" });
+    const blob = new Blob([watermark + content + footer], { type: "text/plain" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `BETA-AI-Corrected-Doc-${analysis.id}-${Date.now()}.txt`;
+    a.download = `BETA-Doc-${analysis.id}-${label.replace(/[^a-z0-9]/gi, "-").toLowerCase()}-${Date.now()}.txt`;
     a.click();
     URL.revokeObjectURL(url);
   };
 
+  const compareLeft = compareIds ? snapshots.find(s => s.id === compareIds[0]) : null;
+  const compareRight = compareIds ? snapshots.find(s => s.id === compareIds[1]) : null;
+
   return (
     <div className="space-y-4">
-      {/* Context banner */}
+      {/* Banner */}
       <div className="flex items-start gap-3 p-3 rounded-lg bg-primary/5 border border-primary/20">
         <Sparkles className="w-4 h-4 text-primary shrink-0 mt-0.5" />
         <div className="flex-1 min-w-0">
           <p className="text-sm font-medium">AI Document Editor</p>
           <p className="text-xs text-muted-foreground mt-0.5">
             {unresolvedCount > 0
-              ? `${unresolvedCount} open finding${unresolvedCount !== 1 ? "s" : ""} will be used to correct this document. You can also manually edit the text below.`
-              : "All findings are resolved. You can still ask AI to improve or reformat the document."}
+              ? `${unresolvedCount} open finding${unresolvedCount !== 1 ? "s" : ""} will be used to correct this document. Each AI run and manual save creates a new version you can compare or restore.`
+              : "All findings resolved. Ask AI to improve or reformat — each run is saved as a version."}
           </p>
         </div>
       </div>
 
-      {/* AI instruction + apply button */}
+      {/* AI instruction row */}
       <div className="flex gap-2 items-end">
         <div className="flex-1 space-y-1">
           <Label className="text-xs text-muted-foreground">Additional instruction for AI (optional)</Label>
@@ -214,34 +643,40 @@ function AIDocumentEditor({ analysis, findings }: { analysis: Analysis; findings
         </Button>
       </div>
 
-      {/* Toolbar */}
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-1.5">
-          <PenLine className="w-3.5 h-3.5 text-muted-foreground" />
-          <span className="text-xs text-muted-foreground">
-            {hasChanges
-              ? aiVersion
-                ? "AI-corrected version — you can still edit below"
-                : "Manually edited"
-              : "Original SOP draft from analysis"}
-          </span>
-          {hasChanges && (
-            <Badge className="text-[10px] px-1.5 py-0 h-4 ml-1 bg-primary/10 text-primary border-0">
-              Modified
+      {/* Editor toolbar */}
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <div className="flex items-center gap-1.5 flex-wrap">
+          <TypePill type={activeSnap.type} />
+          <span className="text-xs text-muted-foreground font-medium">{activeSnap.label}</span>
+          {isDirty && (
+            <Badge className="text-[10px] px-1.5 py-0 h-4 bg-orange-100 dark:bg-orange-900/30 text-orange-700 dark:text-orange-400 border-0">
+              Unsaved changes
             </Badge>
           )}
         </div>
         <div className="flex items-center gap-1">
-          {hasChanges && (
+          {isDirty && (
             <Button
-              variant="ghost" size="sm"
-              className="h-7 text-xs gap-1.5 text-muted-foreground"
-              onClick={handleReset}
-              data-testid="button-reset-editor"
+              variant="outline" size="sm"
+              className="h-7 text-xs gap-1.5"
+              onClick={handleSaveSnapshot}
+              data-testid="button-save-snapshot"
             >
-              <RotateCcw className="w-3 h-3" /> Reset
+              <Bookmark className="w-3 h-3" /> Save Version
             </Button>
           )}
+          <Button
+            variant="ghost" size="sm"
+            className={`h-7 text-xs gap-1.5 ${showHistory ? "text-primary" : ""}`}
+            onClick={() => { setShowHistory(v => !v); setCompareIds(null); }}
+            data-testid="button-toggle-history"
+          >
+            <History className="w-3 h-3" />
+            History
+            {snapshots.length > 1 && (
+              <span className="text-[10px] bg-primary/10 text-primary rounded-full px-1.5 py-0">{snapshots.length}</span>
+            )}
+          </Button>
           <Button
             variant="ghost" size="sm"
             className="h-7 text-xs gap-1.5"
@@ -253,7 +688,7 @@ function AIDocumentEditor({ analysis, findings }: { analysis: Analysis; findings
           <Button
             variant="outline" size="sm"
             className="h-7 text-xs gap-1.5"
-            onClick={handleDownload}
+            onClick={() => handleDownload(editorContent, activeSnap.label)}
             disabled={!editorContent}
             data-testid="button-download-corrected"
           >
@@ -262,41 +697,60 @@ function AIDocumentEditor({ analysis, findings }: { analysis: Analysis; findings
         </div>
       </div>
 
-      {/* Editable document */}
-      {editorContent ? (
-        <div className="relative">
-          {correctMutation.isPending && (
-            <div className="absolute inset-0 bg-background/70 rounded-lg z-10 flex items-center justify-center">
-              <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                <Loader2 className="w-4 h-4 animate-spin text-primary" />
-                AI is rewriting your document…
-              </div>
-            </div>
-          )}
-          <Textarea
-            value={editorContent}
-            onChange={e => handleEditorChange(e.target.value)}
-            className="font-mono text-xs leading-relaxed min-h-[480px] resize-y"
-            placeholder="Document content will appear here after analysis…"
-            data-testid="textarea-doc-editor"
-          />
-          <p className="text-[10px] text-muted-foreground mt-1 text-right">
-            {editorContent.length.toLocaleString()} characters · {editorContent.split("\n").length} lines
-          </p>
-        </div>
-      ) : (
-        <div className="text-center py-12 border-2 border-dashed border-border rounded-xl">
-          <FileText className="w-8 h-8 text-muted-foreground/30 mx-auto mb-2" />
-          <p className="text-sm text-muted-foreground">No document content available.</p>
-          <p className="text-xs text-muted-foreground/60 mt-1">Run the gap analysis first to generate a corrected document draft.</p>
-        </div>
+      {/* Version history panel */}
+      {showHistory && (
+        <VersionHistoryPanel
+          snapshots={snapshots}
+          activeId={activeId}
+          onRestore={handleRestore}
+          onCompare={handleCompare}
+          compareIds={compareIds}
+          onSetCompare={setCompareIds}
+        />
       )}
 
-      {/* Findings reference panel */}
+      {/* Diff viewer */}
+      {compareIds && compareLeft && compareRight && (
+        <DiffViewer leftSnap={compareLeft} rightSnap={compareRight} />
+      )}
+
+      {/* Editor area */}
+      {!compareIds && (
+        editorContent || analysis.sopDraft ? (
+          <div className="relative">
+            {correctMutation.isPending && (
+              <div className="absolute inset-0 bg-background/70 rounded-lg z-10 flex items-center justify-center">
+                <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                  <Loader2 className="w-4 h-4 animate-spin text-primary" />
+                  AI is rewriting your document…
+                </div>
+              </div>
+            )}
+            <Textarea
+              value={editorContent}
+              onChange={e => handleEditorChange(e.target.value)}
+              className="font-mono text-xs leading-relaxed min-h-[480px] resize-y"
+              placeholder="Document content will appear here after analysis…"
+              data-testid="textarea-doc-editor"
+            />
+            <p className="text-[10px] text-muted-foreground mt-1 text-right">
+              {editorContent.length.toLocaleString()} chars · {editorContent.split("\n").length} lines
+            </p>
+          </div>
+        ) : (
+          <div className="text-center py-12 border-2 border-dashed border-border rounded-xl">
+            <FileText className="w-8 h-8 text-muted-foreground/30 mx-auto mb-2" />
+            <p className="text-sm text-muted-foreground">No document content available.</p>
+            <p className="text-xs text-muted-foreground/60 mt-1">Run the gap analysis first to generate a corrected document draft.</p>
+          </div>
+        )
+      )}
+
+      {/* Findings reference */}
       {findings.filter(f => !f.resolved).length > 0 && (
         <details className="group">
           <summary className="cursor-pointer text-xs text-muted-foreground hover:text-foreground transition-colors list-none flex items-center gap-1.5 py-1">
-            <span className="group-open:rotate-90 inline-block transition-transform">▶</span>
+            <ChevronRight className="w-3 h-3 group-open:rotate-90 transition-transform" />
             View {findings.filter(f => !f.resolved).length} open finding{findings.filter(f => !f.resolved).length !== 1 ? "s" : ""} the AI will address
           </summary>
           <div className="mt-2 space-y-1.5 max-h-48 overflow-y-auto">
@@ -322,7 +776,7 @@ export default function AnalysisDetail() {
   const { toast } = useToast();
   const [, navigate] = useLocation();
 
-  const { data: analysis, isLoading, refetch } = useQuery<Analysis>({
+  const { data: analysis, isLoading } = useQuery<Analysis>({
     queryKey: ["/api/analyses", id],
     queryFn: () => fetch(`/api/analyses/${id}`).then(r => r.json()),
     refetchInterval: (data) => data?.status === "running" ? 2000 : false,
@@ -400,7 +854,6 @@ export default function AnalysisDetail() {
         </Link>
       </div>
 
-      {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
         <div>
           <h1 className="text-xl font-semibold">{analysis.title}</h1>
@@ -432,13 +885,10 @@ export default function AnalysisDetail() {
 
       {analysis.status === "complete" && (
         <>
-          {/* Score card */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
             <Card className="border-card-border col-span-2 sm:col-span-1">
               <CardContent className="p-4 text-center">
-                <p className={`text-3xl font-bold ${scoreColor}`}>
-                  {Math.round(analysis.overallScore)}%
-                </p>
+                <p className={`text-3xl font-bold ${scoreColor}`}>{Math.round(analysis.overallScore)}%</p>
                 <p className="text-xs text-muted-foreground mt-1">Compliance Score</p>
                 <Progress value={analysis.overallScore} className="h-1.5 mt-2" />
               </CardContent>
@@ -457,7 +907,6 @@ export default function AnalysisDetail() {
             ))}
           </div>
 
-          {/* Summary + Radar side by side */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {analysis.summary && (
               <Card className="border-card-border bg-muted/20">
@@ -477,15 +926,13 @@ export default function AnalysisDetail() {
               </TabsTrigger>
               <TabsTrigger value="sop">SOP Draft</TabsTrigger>
               <TabsTrigger value="ai-editor" data-testid="tab-ai-editor">
-                <Wand2 className="w-3.5 h-3.5 mr-1.5" />
-                AI Editor
+                <Wand2 className="w-3.5 h-3.5 mr-1.5" /> AI Editor
               </TabsTrigger>
               {resolved.length > 0 && (
                 <TabsTrigger value="resolved">Resolved ({resolved.length})</TabsTrigger>
               )}
             </TabsList>
 
-            {/* ── Findings tab ── */}
             <TabsContent value="findings" className="mt-4 space-y-3">
               {findings.filter(f => !f.resolved).length === 0 ? (
                 <div className="text-center py-10">
@@ -494,8 +941,7 @@ export default function AnalysisDetail() {
                 </div>
               ) : (
                 findings.filter(f => !f.resolved).map(finding => (
-                  <Card key={finding.id} className="border-card-border"
-                    data-testid={`card-finding-${finding.id}`}>
+                  <Card key={finding.id} className="border-card-border" data-testid={`card-finding-${finding.id}`}>
                     <CardContent className="p-4">
                       <div className="flex items-start gap-3">
                         <SeverityIcon severity={finding.severity} />
@@ -519,9 +965,7 @@ export default function AnalysisDetail() {
                               <Button
                                 size="sm" variant="ghost"
                                 className="h-6 text-xs px-2 shrink-0 text-muted-foreground hover:text-foreground"
-                                onClick={() => {
-                                  navigate(`/capas?from=finding&analysisId=${analysis.id}&findingId=${finding.id}&title=${encodeURIComponent(finding.description.substring(0, 80))}`);
-                                }}
+                                onClick={() => navigate(`/capas?from=finding&analysisId=${analysis.id}&findingId=${finding.id}&title=${encodeURIComponent(finding.description.substring(0, 80))}`)}
                               >
                                 <Plus className="w-3 h-3 mr-1" /> CAPA
                               </Button>
@@ -540,7 +984,6 @@ export default function AnalysisDetail() {
               )}
             </TabsContent>
 
-            {/* ── SOP Draft tab ── */}
             <TabsContent value="sop" className="mt-4">
               {analysis.sopDraft ? (
                 <div className="relative">
@@ -562,12 +1005,10 @@ export default function AnalysisDetail() {
               )}
             </TabsContent>
 
-            {/* ── AI Editor tab ── */}
             <TabsContent value="ai-editor" className="mt-4">
               <AIDocumentEditor analysis={analysis} findings={findings} />
             </TabsContent>
 
-            {/* ── Resolved tab ── */}
             <TabsContent value="resolved" className="mt-4 space-y-3">
               {resolved.map(finding => (
                 <Card key={finding.id} className="border-card-border opacity-60">
