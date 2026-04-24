@@ -1,5 +1,5 @@
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { useParams, Link } from "wouter";
+import { useParams, Link, useLocation } from "wouter";
 import { queryClient, apiRequest } from "@/lib/queryClient";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -10,10 +10,11 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
 import {
   ArrowLeft, CheckCircle2, AlertTriangle, Info, XCircle,
-  FileText, Download, RefreshCw, Circle
+  FileText, Download, RefreshCw, Circle, Plus
 } from "lucide-react";
 import type { Analysis } from "@shared/schema";
 import type { Finding } from "@shared/schema";
+import { RadarChart, Radar, PolarGrid, PolarAngleAxis, ResponsiveContainer, Tooltip } from "recharts";
 
 function SeverityIcon({ severity }: { severity: Finding["severity"] }) {
   if (severity === "critical") return <XCircle className="w-4 h-4 text-red-500 shrink-0" />;
@@ -47,9 +48,50 @@ const CATEGORY_LABELS: Record<string, string> = {
   other: "Other",
 };
 
+function ComplianceRadar({ findings, score }: { findings: Finding[]; score: number }) {
+  const categories = [
+    { label: "Signatures", key: "signature" },
+    { label: "Dates", key: "date" },
+    { label: "Procedures", key: "procedure_gap" },
+    { label: "Formatting", key: "formatting" },
+    { label: "Terminology", key: "terminology" },
+    { label: "Fields", key: "missing_field" },
+  ];
+
+  const data = categories.map(cat => {
+    const catFindings = findings.filter(f => f.category === cat.key);
+    const criticals = catFindings.filter(f => f.severity === "critical").length;
+    const majors = catFindings.filter(f => f.severity === "major").length;
+    const penalty = Math.min(100, criticals * 30 + majors * 15);
+    return { subject: cat.label, score: Math.max(0, 100 - penalty), fullMark: 100 };
+  });
+
+  return (
+    <Card className="border-card-border">
+      <CardHeader className="pb-2">
+        <CardTitle className="text-sm">Compliance Radar</CardTitle>
+      </CardHeader>
+      <CardContent className="pt-0">
+        <ResponsiveContainer width="100%" height={220}>
+          <RadarChart data={data}>
+            <PolarGrid stroke="hsl(var(--border))" />
+            <PolarAngleAxis dataKey="subject" tick={{ fontSize: 11, fill: "hsl(var(--muted-foreground))" }} />
+            <Tooltip
+              contentStyle={{ background: "hsl(var(--card))", border: "1px solid hsl(var(--border))", borderRadius: 8, fontSize: 12 }}
+              formatter={(val: number) => [`${val}%`, "Score"]}
+            />
+            <Radar name="Compliance" dataKey="score" stroke="hsl(var(--primary))" fill="hsl(var(--primary))" fillOpacity={0.25} strokeWidth={2} />
+          </RadarChart>
+        </ResponsiveContainer>
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function AnalysisDetail() {
   const { id } = useParams<{ id: string }>();
   const { toast } = useToast();
+  const [, navigate] = useLocation();
 
   const { data: analysis, isLoading, refetch } = useQuery<Analysis>({
     queryKey: ["/api/analyses", id],
@@ -186,15 +228,18 @@ export default function AnalysisDetail() {
             ))}
           </div>
 
-          {/* Summary */}
-          {analysis.summary && (
-            <Card className="border-card-border bg-muted/20">
-              <CardContent className="p-4">
-                <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-2">AI Summary</p>
-                <p className="text-sm leading-relaxed">{analysis.summary}</p>
-              </CardContent>
-            </Card>
-          )}
+          {/* Summary + Radar side by side */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {analysis.summary && (
+              <Card className="border-card-border bg-muted/20">
+                <CardContent className="p-4">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-2">AI Summary</p>
+                  <p className="text-sm leading-relaxed">{analysis.summary}</p>
+                </CardContent>
+              </Card>
+            )}
+            {findings.length > 0 && <ComplianceRadar findings={findings} score={analysis.overallScore} />}
+          </div>
 
           <Tabs defaultValue="findings">
             <TabsList>
@@ -228,14 +273,26 @@ export default function AnalysisDetail() {
                                 {CATEGORY_LABELS[finding.category] || finding.category}
                               </span>
                             </div>
-                            <Button
-                              size="sm" variant="outline"
-                              className="h-6 text-xs px-2 shrink-0"
-                              onClick={() => resolveMutation.mutate({ analysisId: analysis.id, findingId: finding.id })}
-                              data-testid={`button-resolve-${finding.id}`}
-                            >
-                              Mark resolved
-                            </Button>
+                            <div className="flex items-center gap-1">
+                              <Button
+                                size="sm" variant="outline"
+                                className="h-6 text-xs px-2 shrink-0"
+                                onClick={() => resolveMutation.mutate({ analysisId: analysis.id, findingId: finding.id })}
+                                data-testid={`button-resolve-${finding.id}`}
+                              >
+                                Mark resolved
+                              </Button>
+                              <Button
+                                size="sm" variant="ghost"
+                                className="h-6 text-xs px-2 shrink-0 text-muted-foreground hover:text-foreground"
+                                onClick={() => {
+                                  // Navigate to CAPAs page with pre-filled info in URL
+                                  navigate(`/capas?from=finding&analysisId=${analysis.id}&findingId=${finding.id}&title=${encodeURIComponent(finding.description.substring(0, 80))}`);
+                                }}
+                              >
+                                <Plus className="w-3 h-3 mr-1" /> CAPA
+                              </Button>
+                            </div>
                           </div>
                           <p className="text-sm mb-2">{finding.description}</p>
                           <div className="bg-muted/30 rounded-md p-2.5">

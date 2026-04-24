@@ -77,6 +77,92 @@ sqlite.exec(`
   );
 `);
 
+// New feature tables (v2)
+sqlite.exec(`
+  CREATE TABLE IF NOT EXISTS capas (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_id INTEGER NOT NULL,
+    analysis_id INTEGER,
+    finding_id TEXT,
+    title TEXT NOT NULL,
+    description TEXT NOT NULL,
+    root_cause TEXT,
+    corrective_action TEXT,
+    preventive_action TEXT,
+    assigned_to TEXT,
+    priority TEXT NOT NULL DEFAULT 'medium',
+    status TEXT NOT NULL DEFAULT 'open',
+    due_date TEXT,
+    closed_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS training_records (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_id INTEGER NOT NULL,
+    trainee_name TEXT NOT NULL,
+    trainee_email TEXT,
+    training_title TEXT NOT NULL,
+    training_type TEXT NOT NULL DEFAULT 'SOP',
+    completed_date TEXT NOT NULL,
+    expiry_date TEXT,
+    certificate_content TEXT,
+    status TEXT NOT NULL DEFAULT 'active',
+    notes TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS nonconformances (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    client_id INTEGER NOT NULL,
+    ref_number TEXT NOT NULL,
+    title TEXT NOT NULL,
+    description TEXT NOT NULL,
+    detected_by TEXT,
+    detected_date TEXT NOT NULL,
+    area TEXT,
+    severity TEXT NOT NULL DEFAULT 'minor',
+    immediate_action TEXT,
+    status TEXT NOT NULL DEFAULT 'open',
+    capa_id INTEGER,
+    closed_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS notifications (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    message TEXT NOT NULL,
+    type TEXT NOT NULL DEFAULT 'info',
+    link TEXT,
+    read INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS onboarding_state (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL UNIQUE,
+    completed INTEGER NOT NULL DEFAULT 0,
+    step INTEGER NOT NULL DEFAULT 0,
+    completed_at TEXT
+  );
+`);
+
+// Add version control columns to documents if they don't exist yet
+try {
+  sqlite.exec(`ALTER TABLE documents ADD COLUMN version_number TEXT NOT NULL DEFAULT '1.0'`);
+} catch {}
+try {
+  sqlite.exec(`ALTER TABLE documents ADD COLUMN version_status TEXT NOT NULL DEFAULT 'current'`);
+} catch {}
+try {
+  sqlite.exec(`ALTER TABLE documents ADD COLUMN parent_document_id INTEGER`);
+} catch {}
+try {
+  sqlite.exec(`ALTER TABLE documents ADD COLUMN change_note TEXT`);
+} catch {}
+
 // Seed default settings
 const defaultSettings = [
   { key: "ai_provider", value: "groq" }, // "groq" | "perplexity" | "ollama"

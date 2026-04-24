@@ -1,6 +1,7 @@
-import type { Express, Request } from "express";
+import type { Express, Request, Response, NextFunction } from "express";
 import type { Server } from "http";
 import Groq from "groq-sdk";
+import jwt from "jsonwebtoken";
 import { storage } from "./storage";
 import { encrypt, decrypt } from "./encryption";
 import { logAudit, getAuditLogs, clearAuditLogs } from "./audit-logger";
@@ -18,6 +19,34 @@ import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import * as crypto from "crypto";
+
+const JWT_SECRET = process.env.JWT_SECRET || "labaudit-jwt-secret-change-in-production";
+const JWT_EXPIRY = "7d";
+
+// ─── JWT helpers ─────────────────────────────────────────────────────────────
+function signToken(userId: number, role: string): string {
+  return jwt.sign({ userId, role }, JWT_SECRET, { expiresIn: JWT_EXPIRY });
+}
+
+function requireAuth(req: Request, res: Response, next: NextFunction) {
+  const token = req.cookies?.token || req.headers.authorization?.replace("Bearer ", "");
+  if (!token) return res.status(401).json({ message: "Not authenticated" });
+  try {
+    const payload = jwt.verify(token, JWT_SECRET) as { userId: number; role: string };
+    (req as any).jwtUser = payload;
+    next();
+  } catch {
+    return res.status(401).json({ message: "Invalid or expired session" });
+  }
+}
+
+function requireAdmin(req: Request, res: Response, next: NextFunction) {
+  requireAuth(req, res, () => {
+    const user = (req as any).jwtUser;
+    if (user?.role !== "admin") return res.status(403).json({ message: "Admin access required" });
+    next();
+  });
+}
 
 // ─── Scanned PDF → OCR helper ──────────────────────────────────────────────────
 async function ocrScannedPdf(pdfBuffer: Buffer): Promise<string> {
@@ -296,7 +325,8 @@ function getIP(req: Request): string {
 }
 
 export async function registerRoutes(httpServer: Server, app: Express) {
-
+  // cookie-parser must be used in index.ts — handled via express built-in json
+  // We read cookies manually if cookie-parser isn't there
 
   // ── File extraction ────────────────────────────────────────────────────────
   // Accepts any file up to 20MB, extracts plain text, returns { text, fileName, mimeType }
@@ -370,6 +400,27 @@ export async function registerRoutes(httpServer: Server, app: Express) {
       return res.status(401).json({ message: "Invalid credentials" });
     }
     logAudit({ userId: user.id, userEmail: user.email, action: "login", success: true, ipAddress: getIP(req) });
+    const token = signToken(user.id, user.role);
+    res.cookie("token", token, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: "lax",
+      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+    });
+    const { password: _, ...safeUser } = user;
+    return res.json({ ...safeUser, token }); // also return token for header-based clients
+  });
+
+  app.post("/api/auth/logout", (req, res) => {
+    res.clearCookie("token");
+    return res.json({ success: true });
+  });
+
+  // /api/auth/me — validate current session and return user
+  app.get("/api/auth/me", requireAuth, (req, res) => {
+    const { userId } = (req as any).jwtUser;
+    const user = storage.getUserById(userId);
+    if (!user) return res.status(404).json({ message: "User not found" });
     const { password: _, ...safeUser } = user;
     return res.json(safeUser);
   });
@@ -381,21 +432,73 @@ export async function registerRoutes(httpServer: Server, app: Express) {
     if (existing) return res.status(409).json({ message: "Email already registered" });
     const user = storage.createUser({ email, password, name, role: "client", organizationName });
     logAudit({ userId: user.id, userEmail: user.email, action: "user_create", success: true, ipAddress: getIP(req) });
+    const token = signToken(user.id, user.role);
+    res.cookie("token", token, { httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "lax", maxAge: 7 * 24 * 60 * 60 * 1000 });
     const { password: _, ...safeUser } = user;
-    return res.json(safeUser);
+    return res.json({ ...safeUser, token });
   });
 
   app.post("/api/auth/beta-access", (req, res) => {
+    // Issue a guest admin token for beta testers
+    const adminUser = storage.getUserByEmail("admin@labaudit.ai");
+    const token = adminUser ? signToken(adminUser.id, adminUser.role) : signToken(1, "admin");
+    res.cookie("token", token, { httpOnly: true, secure: process.env.NODE_ENV === "production", sameSite: "lax", maxAge: 7 * 24 * 60 * 60 * 1000 });
     logAudit({ userEmail: "beta-user", action: "beta_access", success: true, ipAddress: getIP(req), details: JSON.stringify({ userAgent: req.headers["user-agent"] }) });
-    return res.json({ success: true });
+    return res.json({ success: true, token });
   });
 
-  // ── Users ─────────────────────────────────────────────────────────────────
+  // ── Users & RBAC ──────────────────────────────────────────────────────────
+  app.get("/api/users", requireAdmin, (_req, res) => {
+    const allUsers = storage.getAllUsers().map(u => {
+      const { password: _, ...safe } = u;
+      return safe;
+    });
+    return res.json(allUsers);
+  });
+
   app.get("/api/users/:id", (req, res) => {
     const user = storage.getUserById(Number(req.params.id));
     if (!user) return res.status(404).json({ message: "User not found" });
     const { password: _, ...safeUser } = user;
     return res.json(safeUser);
+  });
+
+  app.patch("/api/users/:id/role", requireAdmin, (req, res) => {
+    const { role } = req.body;
+    const validRoles = ["admin", "client", "lab_manager", "qa_analyst", "reviewer", "auditor"];
+    if (!role || !validRoles.includes(role)) return res.status(400).json({ message: "Invalid role" });
+    const updated = storage.updateUser(Number(req.params.id), { role });
+    if (!updated) return res.status(404).json({ message: "User not found" });
+    logAudit({ action: "user_role_update", resource: `user:${req.params.id}`, success: true, details: JSON.stringify({ role }) });
+    const { password: _, ...safe } = updated;
+    return res.json(safe);
+  });
+
+  app.patch("/api/users/:id", requireAdmin, (req, res) => {
+    const { name, email, organizationName, password } = req.body;
+    const updates: any = {};
+    if (name) updates.name = name;
+    if (email) updates.email = email;
+    if (organizationName) updates.organizationName = organizationName;
+    if (password) updates.password = password;
+    const updated = storage.updateUser(Number(req.params.id), updates);
+    if (!updated) return res.status(404).json({ message: "User not found" });
+    const { password: _, ...safe } = updated;
+    return res.json(safe);
+  });
+
+  // ── Onboarding ────────────────────────────────────────────────────────────
+  app.get("/api/onboarding", requireAuth, (req, res) => {
+    const { userId } = (req as any).jwtUser;
+    const state = storage.getOnboardingState(userId);
+    return res.json(state || { completed: 0, step: 0 });
+  });
+
+  app.post("/api/onboarding", requireAuth, (req, res) => {
+    const { userId } = (req as any).jwtUser;
+    const { step, completed } = req.body;
+    storage.setOnboardingState(userId, step ?? 0, completed ?? false);
+    return res.json({ success: true });
   });
 
   // ── Clients ───────────────────────────────────────────────────────────────
@@ -551,6 +654,21 @@ export async function registerRoutes(httpServer: Server, app: Express) {
         details: JSON.stringify({ score: result.score, findingsCount: result.findings.length }),
       });
 
+      // In-app notification: analysis complete
+      try {
+        const adminUser = storage.getUserByEmail("admin@labaudit.ai");
+        if (adminUser) {
+          const scoreLabel = result.score >= 80 ? "Good" : result.score >= 60 ? "Fair" : "Needs Attention";
+          storage.createNotification({
+            userId: adminUser.id,
+            title: "Analysis Complete",
+            message: `Score: ${result.score}% (${scoreLabel}) — ${result.findings.length} finding(s) found.`,
+            type: result.score < 60 ? "warning" : "success",
+            link: `/analyses/${analysis.id}`,
+          });
+        }
+      } catch {}
+
     } catch (err) {
       console.error("Analysis failed:", err);
       storage.updateAnalysis(analysis.id, { status: "error" });
@@ -621,5 +739,206 @@ export async function registerRoutes(httpServer: Server, app: Express) {
 
     logAudit({ action: "data_retention_applied", success: true, details: JSON.stringify({ retentionDays, cutoffDate: cutoff, documentsAffected: oldDocs?.count ?? 0 }) });
     return res.json({ retentionDays, cutoffDate: cutoff, documentsAffected: oldDocs?.count ?? 0 });
+  });
+
+  // ── Document version control ───────────────────────────────────────────────
+  app.post("/api/clients/:clientId/documents/:id/new-version", (req, res) => {
+    const parentId = Number(req.params.id);
+    const parent = storage.getDocumentById(parentId);
+    if (!parent) return res.status(404).json({ message: "Parent document not found" });
+    const { content, changeNote } = req.body;
+    if (!content) return res.status(400).json({ message: "Content required" });
+    const parts = (parent.versionNumber || "1.0").split(".");
+    const newMinor = Number(parts[1] || 0) + 1;
+    const newVersion = `${parts[0]}.${newMinor}`;
+    storage.updateDocument(parentId, { versionStatus: "superseded" });
+    const encEnabled = getSetting("encryption_enabled") !== "false";
+    const storedContent = encEnabled ? encrypt(content) : content;
+    const newDoc = storage.createDocument({
+      clientId: Number(req.params.clientId),
+      fileName: parent.fileName,
+      fileType: parent.fileType,
+      content: storedContent,
+      versionNumber: newVersion,
+      versionStatus: "current",
+      parentDocumentId: parentId,
+      changeNote: changeNote || "New version",
+    } as any);
+    logAudit({ action: "document_version_create", resource: `document:${newDoc.id}`, success: true, details: JSON.stringify({ fileName: parent.fileName, version: newVersion }) });
+    return res.json({ ...newDoc, content });
+  });
+
+  app.get("/api/documents/:id/versions", (req, res) => {
+    const doc = storage.getDocumentById(Number(req.params.id));
+    if (!doc) return res.status(404).json({ message: "Document not found" });
+    const allVersions = storage.getDocumentVersions(doc.clientId, doc.fileName);
+    return res.json(allVersions.map(d => ({ ...d, content: undefined })));
+  });
+
+  // ── CAPAs ─────────────────────────────────────────────────────────────────
+  app.get("/api/capas", (_req, res) => res.json(storage.getAllCapas()));
+
+  app.get("/api/clients/:clientId/capas", (req, res) =>
+    res.json(storage.getCapasByClientId(Number(req.params.clientId))));
+
+  app.get("/api/capas/:id", (req, res) => {
+    const capa = storage.getCapaById(Number(req.params.id));
+    if (!capa) return res.status(404).json({ message: "CAPA not found" });
+    return res.json(capa);
+  });
+
+  app.post("/api/capas", (req, res) => {
+    const { clientId, title, description, analysisId, findingId, assignedTo, priority, dueDate, rootCause, correctiveAction, preventiveAction } = req.body;
+    if (!clientId || !title || !description) return res.status(400).json({ message: "Missing required fields" });
+    const capa = storage.createCapa({ clientId: Number(clientId), title, description, analysisId: analysisId ? Number(analysisId) : undefined, findingId, assignedTo, priority: priority || "medium", dueDate, rootCause, correctiveAction, preventiveAction, status: "open" });
+    logAudit({ action: "capa_create", resource: `capa:${capa.id}`, success: true, details: JSON.stringify({ title, clientId }) });
+    if (assignedTo) {
+      const assignedUser = storage.getUserByEmail(assignedTo);
+      if (assignedUser) storage.createNotification({ userId: assignedUser.id, title: "New CAPA Assigned", message: `You have been assigned: ${title}`, type: "warning", link: "/capas" });
+    }
+    return res.json(capa);
+  });
+
+  app.patch("/api/capas/:id", (req, res) => {
+    const updates = req.body;
+    if (updates.status === "closed" && !updates.closedAt) updates.closedAt = new Date().toISOString();
+    const capa = storage.updateCapa(Number(req.params.id), updates);
+    if (!capa) return res.status(404).json({ message: "CAPA not found" });
+    logAudit({ action: "capa_update", resource: `capa:${req.params.id}`, success: true });
+    return res.json(capa);
+  });
+
+  app.delete("/api/capas/:id", (req, res) => {
+    storage.deleteCapa(Number(req.params.id));
+    return res.json({ success: true });
+  });
+
+  // ── Training Records ───────────────────────────────────────────────────────
+  app.get("/api/training-records", (_req, res) => res.json(storage.getAllTrainingRecords()));
+
+  app.get("/api/clients/:clientId/training-records", (req, res) =>
+    res.json(storage.getTrainingRecordsByClientId(Number(req.params.clientId))));
+
+  app.post("/api/training-records", (req, res) => {
+    const { clientId, traineeName, traineeEmail, trainingTitle, trainingType, completedDate, expiryDate, notes } = req.body;
+    if (!clientId || !traineeName || !trainingTitle || !completedDate) return res.status(400).json({ message: "Missing required fields" });
+    const record = storage.createTrainingRecord({ clientId: Number(clientId), traineeName, traineeEmail, trainingTitle, trainingType: trainingType || "SOP", completedDate, expiryDate, notes });
+    logAudit({ action: "training_record_create", resource: `training:${record.id}`, success: true });
+    return res.json(record);
+  });
+
+  app.patch("/api/training-records/:id", (req, res) => {
+    const record = storage.updateTrainingRecord(Number(req.params.id), req.body);
+    if (!record) return res.status(404).json({ message: "Record not found" });
+    return res.json(record);
+  });
+
+  app.delete("/api/training-records/:id", (req, res) => {
+    storage.deleteTrainingRecord(Number(req.params.id));
+    return res.json({ success: true });
+  });
+
+  // ── Nonconformances ────────────────────────────────────────────────────────
+  app.get("/api/nonconformances", (_req, res) => res.json(storage.getAllNonconformances()));
+
+  app.get("/api/clients/:clientId/nonconformances", (req, res) =>
+    res.json(storage.getNonconformancesByClientId(Number(req.params.clientId))));
+
+  app.get("/api/nonconformances/:id", (req, res) => {
+    const nc = storage.getNonconformanceById(Number(req.params.id));
+    if (!nc) return res.status(404).json({ message: "Non-conformance not found" });
+    return res.json(nc);
+  });
+
+  app.post("/api/nonconformances", (req, res) => {
+    const { clientId, title, description, detectedBy, detectedDate, area, severity, immediateAction } = req.body;
+    if (!clientId || !title || !description || !detectedDate) return res.status(400).json({ message: "Missing required fields" });
+    const year = new Date().getFullYear();
+    const all = storage.getAllNonconformances();
+    const seq = String(all.length + 1).padStart(3, "0");
+    const refNumber = `NC-${year}-${seq}`;
+    const nc = storage.createNonconformance({ clientId: Number(clientId), refNumber, title, description, detectedBy, detectedDate, area, severity: severity || "minor", immediateAction, status: "open" });
+    logAudit({ action: "nonconformance_create", resource: `nc:${nc.id}`, success: true, details: JSON.stringify({ refNumber, title }) });
+    return res.json(nc);
+  });
+
+  app.patch("/api/nonconformances/:id", (req, res) => {
+    const updates = req.body;
+    if (updates.status === "closed" && !updates.closedAt) updates.closedAt = new Date().toISOString();
+    const nc = storage.updateNonconformance(Number(req.params.id), updates);
+    if (!nc) return res.status(404).json({ message: "Non-conformance not found" });
+    logAudit({ action: "nonconformance_update", resource: `nc:${req.params.id}`, success: true });
+    return res.json(nc);
+  });
+
+  app.delete("/api/nonconformances/:id", (req, res) => {
+    storage.deleteNonconformance(Number(req.params.id));
+    return res.json({ success: true });
+  });
+
+  // ── Notifications ──────────────────────────────────────────────────────────
+  app.get("/api/notifications", requireAuth, (req, res) => {
+    const { userId } = (req as any).jwtUser;
+    return res.json(storage.getNotificationsByUserId(userId));
+  });
+
+  app.get("/api/notifications/unread-count", requireAuth, (req, res) => {
+    const { userId } = (req as any).jwtUser;
+    return res.json({ count: storage.getUnreadCount(userId) });
+  });
+
+  app.patch("/api/notifications/:id/read", requireAuth, (req, res) => {
+    storage.markNotificationRead(Number(req.params.id));
+    return res.json({ success: true });
+  });
+
+  app.post("/api/notifications/mark-all-read", requireAuth, (req, res) => {
+    const { userId } = (req as any).jwtUser;
+    storage.markAllNotificationsRead(userId);
+    return res.json({ success: true });
+  });
+
+  // ── Users management ───────────────────────────────────────────────────────
+  app.get("/api/users", requireAdmin, (_req, res) => {
+    const allUsers = storage.getAllUsers().map(u => { const { password: _, ...safe } = u; return safe; });
+    return res.json(allUsers);
+  });
+
+  app.patch("/api/users/:id/role", requireAdmin, (req, res) => {
+    const { role } = req.body;
+    const validRoles = ["admin", "client", "lab_manager", "qa_analyst", "reviewer", "auditor"];
+    if (!role || !validRoles.includes(role)) return res.status(400).json({ message: "Invalid role" });
+    const updated = storage.updateUser(Number(req.params.id), { role });
+    if (!updated) return res.status(404).json({ message: "User not found" });
+    logAudit({ action: "user_role_update", resource: `user:${req.params.id}`, success: true, details: JSON.stringify({ role }) });
+    const { password: _, ...safe } = updated;
+    return res.json(safe);
+  });
+
+  app.patch("/api/users/:id", requireAdmin, (req, res) => {
+    const { name, email, organizationName, password } = req.body;
+    const updates: any = {};
+    if (name) updates.name = name;
+    if (email) updates.email = email;
+    if (organizationName) updates.organizationName = organizationName;
+    if (password) updates.password = password;
+    const updated = storage.updateUser(Number(req.params.id), updates);
+    if (!updated) return res.status(404).json({ message: "User not found" });
+    const { password: _, ...safe } = updated;
+    return res.json(safe);
+  });
+
+  // ── Onboarding ─────────────────────────────────────────────────────────────
+  app.get("/api/onboarding", requireAuth, (req, res) => {
+    const { userId } = (req as any).jwtUser;
+    const state = storage.getOnboardingState(userId);
+    return res.json(state || { completed: 0, step: 0 });
+  });
+
+  app.post("/api/onboarding", requireAuth, (req, res) => {
+    const { userId } = (req as any).jwtUser;
+    const { step, completed } = req.body;
+    storage.setOnboardingState(userId, step ?? 0, completed ?? false);
+    return res.json({ success: true });
   });
 }
