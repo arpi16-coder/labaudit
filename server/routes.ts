@@ -12,6 +12,51 @@ import multer from "multer";
 import pdfParse from "pdf-parse";
 import mammoth from "mammoth";
 import { createWorker } from "tesseract.js";
+import { fromBuffer } from "pdf2pic";
+import { execSync } from "child_process";
+import * as fs from "fs";
+import * as path from "path";
+import * as os from "os";
+import * as crypto from "crypto";
+
+// ─── Scanned PDF → OCR helper ──────────────────────────────────────────────────
+async function ocrScannedPdf(pdfBuffer: Buffer): Promise<string> {
+  const tmpDir = path.join(os.tmpdir(), "labaudit-ocr-" + crypto.randomBytes(6).toString("hex"));
+  fs.mkdirSync(tmpDir, { recursive: true });
+  const pdfPath = path.join(tmpDir, "input.pdf");
+  fs.writeFileSync(pdfPath, pdfBuffer);
+
+  try {
+    // Use ghostscript to convert PDF pages to PNG images (150 DPI is enough for OCR)
+    execSync(
+      `gs -dBATCH -dNOPAUSE -sDEVICE=png16m -r150 -dTextAlphaBits=4 -dGraphicsAlphaBits=4 -sOutputFile="${tmpDir}/page-%03d.png" "${pdfPath}"`,
+      { timeout: 60000, stdio: "pipe" }
+    );
+
+    const pages = fs.readdirSync(tmpDir)
+      .filter(f => f.startsWith("page-") && f.endsWith(".png"))
+      .sort();
+
+    if (pages.length === 0) return "";
+
+    const worker = await createWorker("eng", 1, { logger: () => {}, errorHandler: () => {} });
+    const pageTexts: string[] = [];
+    try {
+      for (const page of pages) {
+        const imgBuffer = fs.readFileSync(path.join(tmpDir, page));
+        const { data } = await worker.recognize(imgBuffer);
+        if (data.text?.trim()) pageTexts.push(data.text.trim());
+      }
+    } finally {
+      await worker.terminate();
+    }
+
+    return pageTexts.join("\n\n--- Page Break ---\n\n");
+  } finally {
+    // Clean up temp files
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch {}
+  }
+}
 
 // ─── Multer (in-memory, 20 MB limit) ─────────────────────────────────────────
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
@@ -266,7 +311,22 @@ export async function registerRoutes(httpServer: Server, app: Express) {
 
       if (mime === "application/pdf") {
         const parsed = await pdfParse(file.buffer);
-        text = parsed.text;
+        const rawText = parsed.text?.trim() || "";
+        // Detect scanned PDF: very little real text despite having pages
+        // Heuristic: fewer than 50 real word-like tokens per page = image-based
+        const wordCount = (rawText.match(/[a-zA-Z]{3,}/g) || []).length;
+        const pageCount = parsed.numpages || 1;
+        const wordsPerPage = wordCount / pageCount;
+        if (wordsPerPage < 50 && pageCount >= 1) {
+          // Scanned/image-based PDF — run Ghostscript + Tesseract OCR
+          console.log(`[extract-text] Scanned PDF detected (${wordsPerPage.toFixed(1)} words/page), running OCR...`);
+          const ocrText = await ocrScannedPdf(file.buffer);
+          text = ocrText
+            ? `[OCR extracted from scanned PDF: ${name}]\n\n${ocrText}`
+            : `[Scanned PDF: ${name}] — No readable text detected by OCR. The scan quality may be too low.`;
+        } else {
+          text = rawText;
+        }
       } else if (
         mime === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
         mime === "application/msword" ||
