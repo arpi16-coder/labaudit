@@ -20,11 +20,12 @@ import {
   FileText, Download, RefreshCw, Circle, Plus, Wand2,
   Loader2, Copy, RotateCcw, Sparkles, PenLine,
   History, GitCompare, ChevronDown, ChevronRight, Bookmark,
-  Clock, Cpu, User, OrigamiIcon
+  Clock, Cpu, User, FileDown
 } from "lucide-react";
 import type { Analysis } from "@shared/schema";
 import type { Finding } from "@shared/schema";
 import { RadarChart, Radar, PolarGrid, PolarAngleAxis, ResponsiveContainer, Tooltip } from "recharts";
+import { jsPDF } from "jspdf";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 type SnapshotType = "original" | "ai" | "manual";
@@ -99,6 +100,302 @@ function diffStats(diff: DiffLine[]) {
   };
 }
 
+// ── Redlined PDF export ───────────────────────────────────────────────────────
+const CONTEXT_LINES = 3; // unchanged lines to show around each change hunk
+
+function exportRedlinePDF(
+  leftSnap: VersionSnapshot,
+  rightSnap: VersionSnapshot,
+  analysisTitle: string
+) {
+  const diff = computeDiff(leftSnap.content, rightSnap.content);
+  const stats = diffStats(diff);
+
+  // ── PDF dimensions (A4) ──────────────────────────────────────────────────
+  const doc = new jsPDF({ orientation: "portrait", unit: "pt", format: "a4" });
+  const PW = doc.internal.pageSize.getWidth();   // 595.28
+  const PH = doc.internal.pageSize.getHeight();  // 841.89
+  const ML = 48, MR = 48, MT = 52, MB = 52;
+  const CW = PW - ML - MR;  // content width
+
+  // ── Colour palette ───────────────────────────────────────────────────────
+  const C = {
+    black:    [15,  23,  42] as [number,number,number],
+    grey:     [100, 116, 139] as [number,number,number],
+    lightGrey:[226, 232, 240] as [number,number,number],
+    red:      [185, 28,  28] as [number,number,number],
+    redBg:    [254, 242, 242] as [number,number,number],
+    green:    [21,  128, 61] as [number,number,number],
+    greenBg:  [240, 253, 244] as [number,number,number],
+    teal:     [15,  118, 110] as [number,number,number],
+    white:    [255, 255, 255] as [number,number,number],
+    watermark:[203, 213, 225] as [number,number,number],
+  };
+
+  // ── State ────────────────────────────────────────────────────────────────
+  let y = MT;
+  let pageNum = 1;
+
+  // ── Helpers ──────────────────────────────────────────────────────────────
+  const setFont = (style: "normal" | "bold", size: number, color: [number,number,number]) => {
+    doc.setFont("Courier", style);
+    doc.setFontSize(size);
+    doc.setTextColor(...color);
+  };
+
+  const setFontSans = (style: "normal" | "bold", size: number, color: [number,number,number]) => {
+    doc.setFont("Helvetica", style);
+    doc.setFontSize(size);
+    doc.setTextColor(...color);
+  };
+
+  const lineH = (size: number) => size * 1.45;
+
+  function drawPageFooter() {
+    const fy = PH - 28;
+    doc.setDrawColor(...C.watermark);
+    doc.setLineWidth(0.5);
+    doc.line(ML, fy - 6, PW - MR, fy - 6);
+
+    setFontSans("normal", 7, C.watermark);
+    doc.text("LABAUDIT.AI — BETA — FOR EVALUATION PURPOSES ONLY — NOT FOR OFFICIAL OR REGULATORY USE", ML, fy);
+    doc.text(`Page ${pageNum}`, PW - MR, fy, { align: "right" });
+  }
+
+  function checkNewPage(neededH: number) {
+    if (y + neededH > PH - MB - 30) {
+      drawPageFooter();
+      doc.addPage();
+      pageNum++;
+      y = MT;
+    }
+  }
+
+  // ── Text wrapping ────────────────────────────────────────────────────────
+  // Returns array of wrapped line strings given a max width in pt
+  function wrapText(text: string, maxW: number, fontSize: number): string[] {
+    if (!text.trim()) return [""];
+    const chars = doc.getStringUnitWidth("M") * fontSize / doc.internal.scaleFactor;
+    // Approximate chars per line
+    const charsPerLine = Math.max(1, Math.floor(maxW / (chars * 0.6)));
+    if (text.length <= charsPerLine) return [text];
+    const words = text.split(" ");
+    const lines: string[] = [];
+    let cur = "";
+    for (const w of words) {
+      const test = cur ? cur + " " + w : w;
+      if (test.length <= charsPerLine) {
+        cur = test;
+      } else {
+        if (cur) lines.push(cur);
+        // Hard-break a single word that's too long
+        if (w.length > charsPerLine) {
+          for (let s = 0; s < w.length; s += charsPerLine) lines.push(w.slice(s, s + charsPerLine));
+          cur = "";
+        } else {
+          cur = w;
+        }
+      }
+    }
+    if (cur) lines.push(cur);
+    return lines.length ? lines : [""];
+  }
+
+  // ── Page 1: Cover / header block ────────────────────────────────────────
+  // Teal accent bar
+  doc.setFillColor(...C.teal);
+  doc.rect(ML, y, CW, 3, "F");
+  y += 12;
+
+  // Title
+  setFontSans("bold", 15, C.black);
+  doc.text("LabAudit.ai — Redlined Document", ML, y);
+  y += lineH(15);
+
+  setFontSans("bold", 10, C.teal);
+  doc.text("Tracked Changes Report", ML, y);
+  y += lineH(10) + 4;
+
+  // Analysis title
+  setFontSans("normal", 9, C.grey);
+  const titleLines = wrapText(`Analysis: ${analysisTitle}`, CW, 9);
+  for (const ln of titleLines) { doc.text(ln, ML, y); y += lineH(9); }
+  y += 4;
+
+  // Version comparison row
+  const genDate = new Date().toLocaleString("en-GB", {
+    day: "2-digit", month: "short", year: "numeric",
+    hour: "2-digit", minute: "2-digit",
+  });
+  setFontSans("normal", 8.5, C.grey);
+  doc.text(`Generated: ${genDate}`, ML, y);
+  y += lineH(8.5) + 2;
+
+  // From / to version labels
+  const labelTypeStr = (t: SnapshotType) => t === "ai" ? "AI" : t === "manual" ? "Manual" : "Original";
+  setFontSans("bold", 8.5, C.grey);
+  doc.text(`FROM: ${labelTypeStr(leftSnap.type)} · "${leftSnap.label}"   →   TO: ${labelTypeStr(rightSnap.type)} · "${rightSnap.label}"`, ML, y);
+  y += lineH(8.5) + 10;
+
+  // Stats summary box
+  doc.setFillColor(...C.lightGrey);
+  doc.roundedRect(ML, y, CW, 36, 3, 3, "F");
+
+  const col = CW / 3;
+  const statsData = [
+    { label: "Lines Added",   val: `+${stats.added}`,   color: C.green },
+    { label: "Lines Removed", val: `−${stats.removed}`, color: C.red },
+    { label: "Lines Unchanged", val: `${stats.same}`,   color: C.grey },
+  ];
+  let sx = ML + 12;
+  for (const s of statsData) {
+    setFontSans("bold", 14, s.color);
+    doc.text(s.val, sx, y + 18);
+    setFontSans("normal", 7, C.grey);
+    doc.text(s.label, sx, y + 29);
+    sx += col;
+  }
+  y += 50;
+
+  // Legend
+  const LH = 12;
+  const legendItems = [
+    { color: C.green,  bgColor: C.greenBg, symbol: "+", desc: "Added line" },
+    { color: C.red,    bgColor: C.redBg,   symbol: "−", desc: "Removed line (struck through)" },
+    { color: C.grey,   bgColor: C.white,   symbol: " ", desc: "Unchanged line" },
+  ];
+  let lx = ML;
+  for (const item of legendItems) {
+    doc.setFillColor(...item.bgColor);
+    doc.roundedRect(lx, y, 140, LH + 2, 2, 2, "F");
+    setFont("bold", 8, item.color);
+    doc.text(item.symbol, lx + 5, y + LH - 2);
+    setFontSans("normal", 7.5, C.grey);
+    doc.text(item.desc, lx + 14, y + LH - 2);
+    lx += 150;
+  }
+  y += LH + 14;
+
+  // Divider
+  doc.setDrawColor(...C.lightGrey);
+  doc.setLineWidth(0.75);
+  doc.line(ML, y, PW - MR, y);
+  y += 12;
+
+  // ── Diff body ────────────────────────────────────────────────────────────
+  // Build hunks: group consecutive changes, with CONTEXT_LINES of context around each
+  const FONT_SIZE = 8;
+  const LINE_H = lineH(FONT_SIZE);
+  const GUTTER = 14;   // width of the +/− gutter
+  const TEXT_X = ML + GUTTER;
+  const TEXT_W = CW - GUTTER;
+
+  // Identify which line indices have changes
+  const changedIdx = new Set<number>();
+  diff.forEach((d, i) => { if (d.type !== "same") changedIdx.add(i); });
+
+  // Build visibility set: changed lines + CONTEXT_LINES around them
+  const visible = new Set<number>();
+  changedIdx.forEach(i => {
+    for (let k = Math.max(0, i - CONTEXT_LINES); k <= Math.min(diff.length - 1, i + CONTEXT_LINES); k++) {
+      visible.add(k);
+    }
+  });
+
+  let prevWasSkipped = false;
+  let lineNum = 0;
+
+  for (let i = 0; i < diff.length; i++) {
+    const d = diff[i];
+    lineNum++;
+
+    if (!visible.has(i)) {
+      // Count how many we're skipping
+      if (!prevWasSkipped) {
+        // Draw a "... N unchanged lines" separator
+        let skipCount = 0;
+        for (let k = i; k < diff.length && !visible.has(k); k++) skipCount++;
+        checkNewPage(LINE_H + 4);
+
+        doc.setFillColor(245, 245, 245);
+        doc.rect(ML, y, CW, LINE_H + 2, "F");
+        setFontSans("normal", 7.5, C.grey);
+        doc.text(`   ··· ${skipCount} unchanged line${skipCount !== 1 ? "s" : ""} ···`, ML + GUTTER, y + LINE_H - 1);
+        y += LINE_H + 4;
+        prevWasSkipped = true;
+      }
+      continue;
+    }
+    prevWasSkipped = false;
+
+    if (d.type === "same") {
+      const wrapped = wrapText(d.text, TEXT_W, FONT_SIZE);
+      checkNewPage(LINE_H * wrapped.length + 1);
+      // Gutter line number
+      setFontSans("normal", 6.5, C.lightGrey);
+      doc.text(String(lineNum).padStart(4), ML, y + LINE_H - 2);
+      // Text
+      setFont("normal", FONT_SIZE, C.black);
+      for (const wl of wrapped) {
+        doc.text(wl, TEXT_X, y + LINE_H - 2);
+        y += LINE_H;
+      }
+
+    } else if (d.type === "removed") {
+      const wrapped = wrapText(d.text, TEXT_W - 2, FONT_SIZE);
+      const blockH = LINE_H * wrapped.length + 1;
+      checkNewPage(blockH);
+
+      // Red background
+      doc.setFillColor(...C.redBg);
+      doc.rect(ML, y, CW, blockH, "F");
+      // Gutter symbol
+      setFont("bold", FONT_SIZE + 1, C.red);
+      doc.text("−", ML + 2, y + LINE_H - 2);
+      // Red text
+      setFont("normal", FONT_SIZE, C.red);
+      for (const wl of wrapped) {
+        doc.text(wl, TEXT_X, y + LINE_H - 2);
+        // Strikethrough: draw a horizontal line through the middle of the text
+        const tw = doc.getStringUnitWidth(wl) * FONT_SIZE / doc.internal.scaleFactor;
+        const strikeY = y + LINE_H - 2 - (FONT_SIZE * 0.35);
+        doc.setDrawColor(...C.red);
+        doc.setLineWidth(0.6);
+        if (wl.trim()) doc.line(TEXT_X, strikeY, TEXT_X + tw, strikeY);
+        y += LINE_H;
+      }
+
+    } else {
+      // added
+      const wrapped = wrapText(d.text, TEXT_W - 2, FONT_SIZE);
+      const blockH = LINE_H * wrapped.length + 1;
+      checkNewPage(blockH);
+
+      // Green background
+      doc.setFillColor(...C.greenBg);
+      doc.rect(ML, y, CW, blockH, "F");
+      // Gutter symbol
+      setFont("bold", FONT_SIZE + 1, C.green);
+      doc.text("+", ML + 2, y + LINE_H - 2);
+      // Green text
+      setFont("normal", FONT_SIZE, C.green);
+      for (const wl of wrapped) {
+        doc.text(wl, TEXT_X, y + LINE_H - 2);
+        y += LINE_H;
+      }
+    }
+  }
+
+  // Final page footer
+  drawPageFooter();
+
+  // ── Save ─────────────────────────────────────────────────────────────────
+  const safeName = analysisTitle.replace(/[^a-z0-9]/gi, "-").toLowerCase().slice(0, 40);
+  const fromLabel = leftSnap.label.replace(/[^a-z0-9]/gi, "-").toLowerCase().slice(0, 20);
+  const toLabel   = rightSnap.label.replace(/[^a-z0-9]/gi, "-").toLowerCase().slice(0, 20);
+  doc.save(`BETA-Redline-${safeName}-${fromLabel}-vs-${toLabel}-${Date.now()}.pdf`);
+}
+
 // ── Snapshot type pill ────────────────────────────────────────────────────────
 function TypePill({ type }: { type: SnapshotType }) {
   if (type === "original") return (
@@ -119,15 +416,39 @@ function TypePill({ type }: { type: SnapshotType }) {
 }
 
 // ── Diff viewer ───────────────────────────────────────────────────────────────
-function DiffViewer({ leftSnap, rightSnap }: { leftSnap: VersionSnapshot; rightSnap: VersionSnapshot }) {
+function DiffViewer({
+  leftSnap, rightSnap, analysisTitle,
+}: {
+  leftSnap: VersionSnapshot;
+  rightSnap: VersionSnapshot;
+  analysisTitle: string;
+}) {
+  const { toast } = useToast();
+  const [exporting, setExporting] = useState(false);
+
   const diff = computeDiff(leftSnap.content, rightSnap.content);
   const stats = diffStats(diff);
   const unchanged = stats.same === diff.length;
 
+  const handleExport = () => {
+    setExporting(true);
+    // Wrap in setTimeout so UI updates before the synchronous PDF build locks the thread
+    setTimeout(() => {
+      try {
+        exportRedlinePDF(leftSnap, rightSnap, analysisTitle);
+        toast({ title: "Redlined PDF downloaded", description: "Check your downloads folder." });
+      } catch (e) {
+        toast({ title: "PDF export failed", description: "Could not generate PDF.", variant: "destructive" });
+      } finally {
+        setExporting(false);
+      }
+    }, 50);
+  };
+
   return (
     <div className="space-y-3">
-      {/* Stats bar */}
-      <div className="flex items-center gap-3 text-xs">
+      {/* Stats bar + export button */}
+      <div className="flex items-center gap-3 text-xs flex-wrap">
         <span className="text-muted-foreground">Comparing</span>
         <TypePill type={leftSnap.type} />
         <span className="font-medium text-muted-foreground truncate max-w-[120px]">{leftSnap.label}</span>
@@ -143,6 +464,20 @@ function DiffViewer({ leftSnap, rightSnap }: { leftSnap: VersionSnapshot; rightS
           )}
           {unchanged && (
             <span className="text-muted-foreground">No differences</span>
+          )}
+          {!unchanged && (
+            <Button
+              variant="outline" size="sm"
+              className="h-7 text-xs gap-1.5 ml-2"
+              onClick={handleExport}
+              disabled={exporting}
+              data-testid="button-export-redline-pdf"
+            >
+              {exporting
+                ? <><Loader2 className="w-3 h-3 animate-spin" /> Generating…</>
+                : <><FileDown className="w-3 h-3" /> Export Redline PDF</>
+              }
+            </Button>
           )}
         </div>
       </div>
@@ -711,7 +1046,7 @@ function AIDocumentEditor({ analysis, findings }: { analysis: Analysis; findings
 
       {/* Diff viewer */}
       {compareIds && compareLeft && compareRight && (
-        <DiffViewer leftSnap={compareLeft} rightSnap={compareRight} />
+        <DiffViewer leftSnap={compareLeft} rightSnap={compareRight} analysisTitle={analysis.title} />
       )}
 
       {/* Editor area */}
