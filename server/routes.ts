@@ -8,6 +8,12 @@ import { db } from "./db";
 import { settings } from "@shared/schema";
 import { eq } from "drizzle-orm";
 import type { Finding } from "@shared/schema";
+import multer from "multer";
+import pdfParse from "pdf-parse";
+import mammoth from "mammoth";
+
+// ─── Multer (in-memory, 20 MB limit) ─────────────────────────────────────────
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 
 // ─── Settings helpers ────────────────────────────────────────────────────────
 function getSetting(key: string): string | null {
@@ -244,6 +250,42 @@ function getIP(req: Request): string {
 }
 
 export async function registerRoutes(httpServer: Server, app: Express) {
+
+
+  // ── File extraction ────────────────────────────────────────────────────────
+  // Accepts any file up to 20MB, extracts plain text, returns { text, fileName, mimeType }
+  app.post("/api/extract-text", upload.single("file"), async (req, res) => {
+    try {
+      const file = (req as any).file;
+      if (!file) return res.status(400).json({ message: "No file uploaded" });
+
+      const mime = file.mimetype as string;
+      const name = file.originalname as string;
+      let text = "";
+
+      if (mime === "application/pdf") {
+        const parsed = await pdfParse(file.buffer);
+        text = parsed.text;
+      } else if (
+        mime === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
+        mime === "application/msword" ||
+        name.endsWith(".docx") || name.endsWith(".doc")
+      ) {
+        const result = await mammoth.extractRawText({ buffer: file.buffer });
+        text = result.value;
+      } else if (mime.startsWith("image/")) {
+        text = `[Image file: ${name}]\nNote: Image OCR is not supported in this beta. Please upload a PDF or Word version, or paste the text manually.`;
+      } else {
+        // Plain text, markdown, CSV, JSON, XML, HTML, etc.
+        text = file.buffer.toString("utf-8");
+      }
+
+      res.json({ text: text.trim(), fileName: name, mimeType: mime });
+    } catch (err: any) {
+      console.error("extract-text error:", err);
+      res.status(500).json({ message: "Failed to extract text from file", error: err.message });
+    }
+  });
 
   // ── Auth ──────────────────────────────────────────────────────────────────
   app.post("/api/auth/login", (req, res) => {

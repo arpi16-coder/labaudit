@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useCallback } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { queryClient, apiRequest } from "@/lib/queryClient";
 import { useAuth } from "@/lib/auth";
@@ -12,7 +12,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useToast } from "@/hooks/use-toast";
-import { Upload, FileText, Trash2, Plus, AlertCircle, Zap } from "lucide-react";
+import { Upload, FileText, Trash2, Plus, AlertCircle, Zap, Loader2, FileImage, FileType2 } from "lucide-react";
 import type { Client, Document } from "@shared/schema";
 
 const DOC_TYPES = [
@@ -44,6 +44,8 @@ export default function DocumentsPage() {
   const [open, setOpen] = useState(false);
   const [selectedClientId, setSelectedClientId] = useState<string>("");
   const [form, setForm] = useState({ fileName: "", fileType: "", content: "" });
+  const [extracting, setExtracting] = useState(false);
+  const [fileLabel, setFileLabel] = useState<string>("");
   const [runningAnalysisDocId, setRunningAnalysisDocId] = useState<number | null>(null);
 
   const { data: clients } = useQuery<Client[]>({ queryKey: ["/api/clients"], enabled: user?.role === "admin" });
@@ -105,19 +107,29 @@ export default function DocumentsPage() {
     onError: () => { setRunningAnalysisDocId(null); toast({ title: "Error", variant: "destructive" }); },
   });
 
-  const handleFileRead = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileRead = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = ev => {
-      setForm(f => ({
-        ...f,
-        fileName: file.name,
-        content: (ev.target?.result as string) || "",
-      }));
-    };
-    reader.readAsText(file);
-  };
+    setExtracting(true);
+    setFileLabel(file.name);
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      const res = await fetch("/api/extract-text", { method: "POST", body: formData });
+      if (!res.ok) throw new Error("Extraction failed");
+      const { text, fileName } = await res.json();
+      setForm(f => ({ ...f, fileName: fileName || file.name, content: text }));
+      toast({ title: "File extracted", description: `Text extracted from ${file.name}` });
+    } catch {
+      // Fallback: read as plain text
+      const reader = new FileReader();
+      reader.onload = ev => setForm(f => ({ ...f, fileName: file.name, content: (ev.target?.result as string) || "" }));
+      reader.readAsText(file);
+      toast({ title: "Loaded as plain text", description: file.name, variant: "default" });
+    } finally {
+      setExtracting(false);
+    }
+  }, [toast]);
 
   return (
     <div className="p-6 space-y-5 max-w-5xl mx-auto">
@@ -238,10 +250,27 @@ export default function DocumentsPage() {
             </div>
 
             <div className="space-y-1.5">
-              <Label>Upload File (TXT)</Label>
-              <Input type="file" accept=".txt,.md,.csv" onChange={handleFileRead}
-                data-testid="input-file-upload" />
-              <p className="text-xs text-muted-foreground">Upload a .txt file or paste content below</p>
+              <Label>Upload File</Label>
+              <div className="relative">
+                <Input type="file"
+                  accept=".pdf,.doc,.docx,.txt,.md,.csv,.json,.xml,.html,.png,.jpg,.jpeg,.webp,.tiff"
+                  onChange={handleFileRead}
+                  disabled={extracting}
+                  data-testid="input-file-upload"
+                />
+                {extracting && (
+                  <div className="absolute inset-0 flex items-center justify-center bg-background/80 rounded-md">
+                    <Loader2 className="w-4 h-4 animate-spin mr-2 text-primary" />
+                    <span className="text-xs text-muted-foreground">Extracting text from {fileLabel}…</span>
+                  </div>
+                )}
+              </div>
+              <div className="flex flex-wrap gap-1 mt-1">
+                {[".pdf",".docx",".doc",".txt",".csv",".png",".jpg"].map(ext => (
+                  <span key={ext} className="text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground font-mono">{ext}</span>
+                ))}
+                <span className="text-[10px] text-muted-foreground ml-1">and more — up to 20 MB</span>
+              </div>
             </div>
 
             <div className="space-y-1.5">
