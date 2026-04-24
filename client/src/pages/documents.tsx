@@ -266,10 +266,13 @@ export default function DocumentsPage() {
                 )}
               </div>
               <div className="flex flex-wrap gap-1 mt-1">
-                {[".pdf",".docx",".doc",".txt",".csv",".png",".jpg"].map(ext => (
+                {[".pdf",".docx",".doc",".txt",".csv"].map(ext => (
                   <span key={ext} className="text-[10px] px-1.5 py-0.5 rounded bg-muted text-muted-foreground font-mono">{ext}</span>
                 ))}
-                <span className="text-[10px] text-muted-foreground ml-1">and more — up to 20 MB</span>
+                {[".png",".jpg",".jpeg",".tiff"].map(ext => (
+                  <span key={ext} className="text-[10px] px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400 font-mono">{ext}</span>
+                ))}
+                <span className="text-[10px] text-muted-foreground ml-1">Images are OCR-scanned — up to 20 MB</span>
               </div>
             </div>
 

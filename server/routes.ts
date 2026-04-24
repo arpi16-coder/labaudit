@@ -11,6 +11,7 @@ import type { Finding } from "@shared/schema";
 import multer from "multer";
 import pdfParse from "pdf-parse";
 import mammoth from "mammoth";
+import { createWorker } from "tesseract.js";
 
 // ─── Multer (in-memory, 20 MB limit) ─────────────────────────────────────────
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
@@ -274,7 +275,19 @@ export async function registerRoutes(httpServer: Server, app: Express) {
         const result = await mammoth.extractRawText({ buffer: file.buffer });
         text = result.value;
       } else if (mime.startsWith("image/")) {
-        text = `[Image file: ${name}]\nNote: Image OCR is not supported in this beta. Please upload a PDF or Word version, or paste the text manually.`;
+        // Full OCR via Tesseract.js
+        const worker = await createWorker("eng", 1, {
+          logger: () => {}, // suppress verbose logs
+          errorHandler: () => {},
+        });
+        try {
+          const { data } = await worker.recognize(file.buffer);
+          text = data.text?.trim() || "";
+          if (!text) text = `[Image file: ${name}] — No readable text detected by OCR.`;
+          else text = `[OCR extracted from image: ${name}]\n\n${text}`;
+        } finally {
+          await worker.terminate();
+        }
       } else {
         // Plain text, markdown, CSV, JSON, XML, HTML, etc.
         text = file.buffer.toString("utf-8");
