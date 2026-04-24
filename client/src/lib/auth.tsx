@@ -12,6 +12,7 @@ interface AuthUser {
 interface AuthContextType {
   user: AuthUser | null;
   login: (email: string, password: string) => Promise<void>;
+  loginAsGuest: () => void;
   logout: () => void;
   isLoading: boolean;
 }
@@ -38,13 +39,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   };
 
+  // Beta mode: auto-login as admin guest (no password needed)
+  const loginAsGuest = () => {
+    const guestUser: AuthUser = {
+      id: 1,
+      email: "admin@labaudit.ai",
+      name: "Admin",
+      role: "admin",
+    };
+    sessionUser = guestUser;
+    setUser(guestUser);
+  };
+
   const logout = () => {
     sessionUser = null;
     setUser(null);
   };
 
   return (
-    <AuthContext.Provider value={{ user, login, logout, isLoading }}>
+    <AuthContext.Provider value={{ user, login, loginAsGuest, logout, isLoading }}>
       {children}
     </AuthContext.Provider>
   );

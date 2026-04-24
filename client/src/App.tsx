@@ -9,6 +9,7 @@ import { AppSidebar } from "@/components/app-sidebar";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { AuthProvider, useAuth } from "@/lib/auth";
 import LoginPage from "@/pages/login";
+import BetaGate, { BETA_EXPIRY } from "@/pages/beta-gate";
 import Dashboard from "@/pages/dashboard";
 import ClientsPage from "@/pages/clients";
 import ClientDetail from "@/pages/client-detail";
@@ -16,7 +17,10 @@ import DocumentsPage from "@/pages/documents";
 import AnalysesPage from "@/pages/analyses";
 import AnalysisDetail from "@/pages/analysis-detail";
 import NotFound from "@/pages/not-found";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
+
+// Beta is active if current date is before expiry
+const IS_BETA_ACTIVE = new Date() < BETA_EXPIRY;
 
 function AppRouter() {
   return (
@@ -34,13 +38,19 @@ function AppRouter() {
 }
 
 function AppShell() {
-  const { user } = useAuth();
+  const { user, loginAsGuest } = useAuth();
+  const [betaUnlocked, setBetaUnlocked] = useState(false);
 
   // Initialize theme from system preference
   useEffect(() => {
     const isDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
     document.documentElement.classList.toggle("dark", isDark);
   }, []);
+
+  // Show beta gate if beta period is active and user hasn't unlocked yet
+  if (IS_BETA_ACTIVE && !betaUnlocked) {
+    return <BetaGate onAccess={() => { setBetaUnlocked(true); loginAsGuest(); }} />;
+  }
 
   if (!user) return <LoginPage />;
 
